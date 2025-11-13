@@ -189,49 +189,58 @@ class EditorWidget(QWidget):
     def on_checkbox_change(self, key, state):
         self.settings[key] = state == Qt.CheckState.Checked
 
-    def save_config(self):
-        if not self.cf:
-            QMessageBox.warning(self, "Error", "Picom config not loaded")
-            return
-        new_lines = []
-        in_blur = False
-        for line in self.cf.lines:
-            stripped = line.strip()
-            if stripped.startswith("blur:"):
-                in_blur = True
+def save_config(self):
+    if not self.cf:
+        QMessageBox.warning(self, "Error", "Picom config not loaded")
+        return
+
+    # Update lines with current settings
+    new_lines = []
+    in_blur = False
+    for line in self.cf.lines:
+        stripped = line.strip()
+        if stripped.startswith("blur:"):
+            in_blur = True
+            new_lines.append(line)
+            continue
+        if in_blur:
+            if stripped.startswith("}"):
+                in_blur = False
                 new_lines.append(line)
                 continue
-            if in_blur:
-                if stripped.startswith("}"):
-                    in_blur = False
-                    new_lines.append(line)
-                    continue
-                # update blur settings
-                if "method" in stripped:
-                    new_lines.append(f'    method = "{self.settings["blur-method"]}";')
-                elif "strength" in stripped:
-                    new_lines.append(f'    strength = {self.settings["blur-strength"]};')
-                else:
-                    new_lines.append(line)
-                continue
-
-            m = re.match(r'(\w[\w-]*)\s*=\s*(.*);', stripped)
-            if m:
-                key = m.group(1).strip()
-                if key in self.settings:
-                    val = self.settings[key]
-                    if isinstance(val, bool):
-                        val = "true" if val else "false"
-                    elif isinstance(val, float):
-                        val = f"{val:.2f}"
-                    new_lines.append(f"{key} = {val};")
-                else:
-                    new_lines.append(line)
+            # update blur settings
+            if "method" in stripped:
+                new_lines.append(f'    method = "{self.settings["blur-method"]}";')
+            elif "strength" in stripped:
+                new_lines.append(f'    strength = {self.settings["blur-strength"]};')
             else:
                 new_lines.append(line)
+            continue
+
+        m = re.match(r'(\w[\w-]*)\s*=\s*(.*);', stripped)
+        if m:
+            key = m.group(1).strip()
+            if key in self.settings:
+                val = self.settings[key]
+                if isinstance(val, bool):
+                    val = "true" if val else "false"
+                elif isinstance(val, float):
+                    val = f"{val:.2f}"
+                new_lines.append(f"{key} = {val};")
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    # Write back to the actual config file
+    try:
         self.cf.lines = new_lines
-        self.cf.save()
-        QMessageBox.information(self, "Saved", "Picom config saved!")
+        saved_path = self.cf.save(backup=True)  # saves and makes backup
+        QMessageBox.information(
+            self, "Saved", f"Picom config saved to:\n{self.cf.path}\nBackup: {saved_path}"
+        )
+    except Exception as e:
+        QMessageBox.critical(self, "Error", f"Failed to save Picom config: {e}")
 
 def create_editor(config=None):
     return EditorWidget(config)
