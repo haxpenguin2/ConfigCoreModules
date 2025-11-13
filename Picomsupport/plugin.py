@@ -1,27 +1,25 @@
-# plugin.py
+# plugin.py — Picom editor plugin for your existing GUI core
+
+import sys
+import os
 from pathlib import Path
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QHBoxLayout,
-    QSlider, QPushButton, QCheckBox
+    QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt
-import shutil
 
-# Import ConfigFile from your GUI core
-from config_core import ConfigFile
-
-PICOM_PATH = str(Path.home() / ".config/picom.conf")
-
+# Add your core folder to sys.path so ConfigFile can be imported
+sys.path.append(os.path.expanduser("~/.config_editor_packages/"))
+try:
+    from config_core import ConfigFile
+except ImportError:
+    ConfigFile = None  # will handle missing core
 
 class EditorWidget(QWidget):
     def __init__(self, config: ConfigFile):
         super().__init__()
-        self.config = config  # this is a ConfigFile instance
-        self._parse_config()
-        self.init_ui()
-
-    def _parse_config(self):
-        """Load current settings from picom.conf into variables."""
+        self.config = config
+        self.picom_path = Path.home() / ".config" / "picom.conf"
         self.settings = {
             "backend": "glx",
             "vsync": True,
@@ -29,103 +27,164 @@ class EditorWidget(QWidget):
             "inactive-opacity": 0.7,
             "active-opacity": 1.0,
             "frame-opacity": 1.0,
-            "fading": True,
             "fade-in-step": 0.03,
             "fade-out-step": 0.03,
             "fade-delta": 10,
+            "fading": True,
             "blur-strength": 5,
             "shadow": True,
-            "shadow-radius": 12,
-            "shadow-opacity": 0.25
+            "shadow-radius": 12
         }
 
-        # read current values from config if exists
-        if self.config:
-            for line in self.config.lines:
-                line = line.strip()
-                if line.startswith("backend"):
-                    self.settings["backend"] = line.split("=")[1].strip().strip('";')
-                elif line.startswith("vsync"):
-                    self.settings["vsync"] = line.split("=")[1].strip().strip(";").lower() == "true"
-                elif line.startswith("corner-radius"):
-                    self.settings["corner-radius"] = int(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("inactive-opacity"):
-                    self.settings["inactive-opacity"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("active-opacity"):
-                    self.settings["active-opacity"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("frame-opacity"):
-                    self.settings["frame-opacity"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("fade-in-step"):
-                    self.settings["fade-in-step"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("fade-out-step"):
-                    self.settings["fade-out-step"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("fade-delta"):
-                    self.settings["fade-delta"] = int(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("blur"):
-                    if "strength" in line:
-                        self.settings["blur-strength"] = int(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("shadow-radius"):
-                    self.settings["shadow-radius"] = int(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("shadow-opacity"):
-                    self.settings["shadow-opacity"] = float(line.split("=")[1].strip().strip(";"))
-                elif line.startswith("shadow"):
-                    self.settings["shadow"] = line.split("=")[1].strip().strip(";").lower() == "true"
-                elif line.startswith("fading"):
-                    self.settings["fading"] = line.split("=")[1].strip().strip(";").lower() == "true"
+        self.load_config()
+        self.init_ui()
 
+    # -------------------------
+    # Load config values safely
+    # -------------------------
+    def load_config(self):
+        if not self.picom_path.exists():
+            return
+        with open(self.picom_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or line == "":
+                    continue
+                # simple parsing for basic types
+                for key in self.settings.keys():
+                    if line.startswith(f"{key} ="):
+                        val = line.split("=", 1)[1].strip().rstrip(";")
+                        if val.lower() in ("true", "false"):
+                            self.settings[key] = val.lower() == "true"
+                        else:
+                            try:
+                                if "." in val:
+                                    self.settings[key] = float(val)
+                                else:
+                                    self.settings[key] = int(val)
+                            except ValueError:
+                                self.settings[key] = val.strip('"')
+
+    # -------------------------
+    # Build GUI
+    # -------------------------
     def init_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        # Example controls
-        layout.addWidget(QLabel("Backend:"))
-        self.backend_label = QLabel(self.settings["backend"])
-        layout.addWidget(self.backend_label)
+        # Show current file
+        layout.addWidget(QLabel(f"Editing Picom config: {self.picom_path}"))
 
-        layout.addWidget(QLabel("VSync:"))
-        self.vsync_checkbox = QCheckBox()
-        self.vsync_checkbox.setChecked(self.settings["vsync"])
-        layout.addWidget(self.vsync_checkbox)
+        # Opacity settings
+        self.inactive_opacity_spin = QDoubleSpinBox()
+        self.inactive_opacity_spin.setRange(0.0, 1.0)
+        self.inactive_opacity_spin.setSingleStep(0.05)
+        self.inactive_opacity_spin.setValue(self.settings["inactive-opacity"])
+        layout.addLayout(self._row("Inactive window opacity:", self.inactive_opacity_spin))
 
-        layout.addWidget(QLabel("Inactive opacity:"))
-        self.inactive_slider = QSlider(Qt.Orientation.Horizontal)
-        self.inactive_slider.setMinimum(0)
-        self.inactive_slider.setMaximum(100)
-        self.inactive_slider.setValue(int(self.settings["inactive-opacity"] * 100))
-        layout.addWidget(self.inactive_slider)
+        self.active_opacity_spin = QDoubleSpinBox()
+        self.active_opacity_spin.setRange(0.0, 1.0)
+        self.active_opacity_spin.setSingleStep(0.05)
+        self.active_opacity_spin.setValue(self.settings["active-opacity"])
+        layout.addLayout(self._row("Active window opacity:", self.active_opacity_spin))
 
-        layout.addWidget(QLabel("Active opacity:"))
-        self.active_slider = QSlider(Qt.Orientation.Horizontal)
-        self.active_slider.setMinimum(0)
-        self.active_slider.setMaximum(100)
-        self.active_slider.setValue(int(self.settings["active-opacity"] * 100))
-        layout.addWidget(self.active_slider)
+        # Fade steps
+        self.fade_in_spin = QDoubleSpinBox()
+        self.fade_in_spin.setRange(0.001, 1.0)
+        self.fade_in_spin.setSingleStep(0.01)
+        self.fade_in_spin.setValue(self.settings["fade-in-step"])
+        layout.addLayout(self._row("Fade in step:", self.fade_in_spin))
+
+        self.fade_out_spin = QDoubleSpinBox()
+        self.fade_out_spin.setRange(0.001, 1.0)
+        self.fade_out_spin.setSingleStep(0.01)
+        self.fade_out_spin.setValue(self.settings["fade-out-step"])
+        layout.addLayout(self._row("Fade out step:", self.fade_out_spin))
+
+        # Rounded corners
+        self.corner_spin = QSpinBox()
+        self.corner_spin.setRange(0, 50)
+        self.corner_spin.setValue(self.settings["corner-radius"])
+        layout.addLayout(self._row("Corner radius:", self.corner_spin))
+
+        # Blur
+        self.blur_spin = QSpinBox()
+        self.blur_spin.setRange(0, 20)
+        self.blur_spin.setValue(self.settings["blur-strength"])
+        layout.addLayout(self._row("Blur strength:", self.blur_spin))
+
+        # Shadow
+        self.shadow_check = QCheckBox("Enable shadow")
+        self.shadow_check.setChecked(self.settings["shadow"])
+        layout.addWidget(self.shadow_check)
+
+        self.shadow_radius_spin = QSpinBox()
+        self.shadow_radius_spin.setRange(0, 50)
+        self.shadow_radius_spin.setValue(self.settings["shadow-radius"])
+        layout.addLayout(self._row("Shadow radius:", self.shadow_radius_spin))
 
         # Save button
-        self.save_btn = QPushButton("Save Config")
-        self.save_btn.clicked.connect(self.save_config)
-        layout.addWidget(self.save_btn)
+        save_btn = QPushButton("Save Picom Config")
+        save_btn.clicked.connect(self.save_config)
+        layout.addWidget(save_btn)
 
+        layout.addStretch()
+
+    def _row(self, label_text, widget):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label_text))
+        row.addWidget(widget)
+        return row
+
+    # -------------------------
+    # Save changes (only modified lines)
+    # -------------------------
     def save_config(self):
-        if not self.config:
-            # create a new file if missing
-            self.config = ConfigFile(PICOM_PATH)
-        # update only the lines we changed
-        self._set_line("backend", f'backend = "{self.settings["backend"]}";')
-        self._set_line("vsync", f'vsync = {"true" if self.vsync_checkbox.isChecked() else "false"};')
-        self._set_line("inactive-opacity", f'inactive-opacity = {self.inactive_slider.value()/100:.2f};')
-        self._set_line("active-opacity", f'active-opacity = {self.active_slider.value()/100:.2f};')
-        # Save with backup
-        bak = self.config.save(backup=True)
-        print(f"Config saved! Backup: {bak}")
+        if not self.picom_path.exists():
+            self.picom_path.parent.mkdir(parents=True, exist_ok=True)
+            self.picom_path.touch()
+        lines = self.picom_path.read_text(encoding="utf-8").splitlines()
+        new_lines = []
+        keys_to_write = {
+            "inactive-opacity": self.inactive_opacity_spin.value(),
+            "active-opacity": self.active_opacity_spin.value(),
+            "fade-in-step": self.fade_in_spin.value(),
+            "fade-out-step": self.fade_out_spin.value(),
+            "corner-radius": self.corner_spin.value(),
+            "blur-strength": self.blur_spin.value(),
+            "shadow": self.shadow_check.isChecked(),
+            "shadow-radius": self.shadow_radius_spin.value()
+        }
 
-    def _set_line(self, key, new_line):
-        """Replace the line starting with key, or append if missing."""
-        found = False
-        for idx, line in enumerate(self.config.lines):
-            if line.strip().startswith(key):
-                self.config.replace_line(idx, new_line)
-                found = True
-                break
-        if not found:
-            self.config.append_line(new_line)
+        # update only existing lines or append if missing
+        keys_written = set()
+        for line in lines:
+            stripped = line.strip()
+            updated = False
+            for key, val in keys_to_write.items():
+                if stripped.startswith(f"{key} ="):
+                    if isinstance(val, bool):
+                        new_val = "true" if val else "false"
+                    elif isinstance(val, str):
+                        new_val = f'"{val}"'
+                    else:
+                        new_val = str(val)
+                    new_lines.append(f"{key} = {new_val};")
+                    keys_written.add(key)
+                    updated = True
+                    break
+            if not updated:
+                new_lines.append(line)
+        # append any missing keys
+        for key, val in keys_to_write.items():
+            if key not in keys_written:
+                if isinstance(val, bool):
+                    new_val = "true" if val else "false"
+                elif isinstance(val, str):
+                    new_val = f'"{val}"'
+                else:
+                    new_val = str(val)
+                new_lines.append(f"{key} = {new_val};")
+
+        self.picom_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        print(f"Saved Picom config to {self.picom_path}")
