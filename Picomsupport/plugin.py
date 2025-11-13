@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Picom Editor plugin for ConfigCore
+Fully reads current picom.conf numeric settings to initialize sliders.
 """
 
 from PyQt6.QtWidgets import (
@@ -8,33 +9,51 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from pathlib import Path
+import re
 
 class EditorWidget(QWidget):
     def __init__(self, config=None):
         super().__init__()
 
-        # If core passes a ConfigFile, use it; else create one for Picom
+        # Load ConfigFile from core, or default to picom.conf
         if config:
             self.cf = config
         else:
-            from pathlib import Path
+            from config_core import ConfigFile
             picom_path = Path.home() / ".config/picom.conf"
-            try:
-                from config_core import ConfigFile
-                self.cf = ConfigFile(str(picom_path))
-            except Exception:
-                self.cf = None
+            self.cf = ConfigFile(str(picom_path)) if picom_path.exists() else None
 
-        # Default settings
+        # Default numeric settings and ranges
+        self.slider_defs = {
+            "blur-radius": (0, 50),
+            "shadow-radius": (0, 50),
+            "corner-radius": (0, 50),
+            "fading": (0, 1000),
+            "inactive-opacity": (0, 100),
+        }
+
+        # Parse current settings from config file
         self.settings = {}
         if self.cf:
             for line in self.cf.lines:
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    self.settings[k.strip()] = v.strip()
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    # Only care about numeric values for sliders
+                    if key in self.slider_defs:
+                        # extract numeric part from val (could be float or int)
+                        match = re.search(r"[\d.]+", val)
+                        if match:
+                            self.settings[key] = float(match.group())
+                        else:
+                            self.settings[key] = self.slider_defs[key][0]
+        # Fill missing defaults
+        for key in self.slider_defs:
+            if key not in self.settings:
+                self.settings[key] = self.slider_defs[key][0]
 
-        # Dark modern style
         self.setStyleSheet("""
             QWidget { background: #071018; color: #dbe7f5; font-family: 'Segoe UI', Roboto, sans-serif; }
             QLabel { font-size: 12pt; }
@@ -48,25 +67,14 @@ class EditorWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout()
-
-        # Define sliders
-        slider_defs = [
-            ("blur-radius", 0, 50),
-            ("shadow-radius", 0, 50),
-            ("corner-radius", 0, 50),
-            ("fading", 0, 1000),
-            ("inactive-opacity", 0, 100)
-        ]
         self.sliders = {}
-        for key, mn, mx in slider_defs:
-            val = int(float(self.settings.get(key, mn)))
-            layout.addLayout(self.create_slider(key, mn, mx, val))
 
-        # Save button
+        for key, (mn, mx) in self.slider_defs.items():
+            layout.addLayout(self.create_slider(key, mn, mx, int(self.settings[key])))
+
         save_btn = QPushButton("Save Picom Config")
         save_btn.clicked.connect(self.save_config)
         layout.addWidget(save_btn)
-
         self.setLayout(layout)
 
     def create_slider(self, key, min_val, max_val, init_val):
@@ -82,7 +90,7 @@ class EditorWidget(QWidget):
         return layout
 
     def on_slider_change(self, key, value, label):
-        self.settings[key] = str(value)
+        self.settings[key] = value
         label.setText(f"{key}: {value}")
 
     def save_config(self):
@@ -103,6 +111,7 @@ class EditorWidget(QWidget):
                     new_lines.append(line)
             else:
                 new_lines.append(line)
+        # append missing settings
         for k, v in self.settings.items():
             if k not in keys_handled:
                 new_lines.append(f"{k} = {v}")
