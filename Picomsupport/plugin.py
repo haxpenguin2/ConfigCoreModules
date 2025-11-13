@@ -1,101 +1,120 @@
+import os
+from pathlib import Path
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QSlider, QCheckBox, QPushButton, QHBoxLayout, QFileDialog
+    QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QPushButton,
+    QHBoxLayout, QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt
-import configparser
-import os
 
-class EditorWidget(QWidget):
-    def __init__(self, config=None):
+class PicomEditor(QWidget):
+    def __init__(self):
         super().__init__()
         self.setWindowTitle("Picom Config Editor")
-        self.config_file = os.path.expanduser("~/.config/picom/picom.conf")
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
+        self.setMinimumSize(500, 400)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1e1e2f;
+                color: #f0f0f0;
+                font-family: Arial;
+            }
+            QSlider::handle:horizontal {
+                background: #5c5cff;
+                border-radius: 8px;
+            }
+            QSlider::groove:horizontal {
+                height: 10px;
+                background: #444;
+                border-radius: 5px;
+            }
+            QPushButton {
+                background-color: #5c5cff;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #4545ff;
+            }
+        """)
+        self.config_path = os.path.expanduser("~/.config/picom.conf")
+        self.config_data = {}
 
-        # Load current config or create defaults
-        self.config = self.load_config()
-
-        # --- Blur slider ---
-        self.blur_label = QLabel(f"Blur radius: {self.config['blur-radius']}")
-        self.blur_slider = QSlider(Qt.Orientation.Horizontal)
-        self.blur_slider.setRange(0, 50)
-        self.blur_slider.setValue(int(self.config['blur-radius']))
-        self.blur_slider.valueChanged.connect(lambda val: self.blur_label.setText(f"Blur radius: {val}"))
-        self.layout.addWidget(self.blur_label)
-        self.layout.addWidget(self.blur_slider)
-
-        # --- Shadow slider ---
-        self.shadow_label = QLabel(f"Shadow opacity: {self.config['shadow-opacity']}")
-        self.shadow_slider = QSlider(Qt.Orientation.Horizontal)
-        self.shadow_slider.setRange(0, 100)
-        self.shadow_slider.setValue(int(float(self.config['shadow-opacity']) * 100))
-        self.shadow_slider.valueChanged.connect(lambda val: self.shadow_label.setText(f"Shadow opacity: {val/100:.2f}"))
-        self.layout.addWidget(self.shadow_label)
-        self.layout.addWidget(self.shadow_slider)
-
-        # --- Rounded corners slider ---
-        self.corner_label = QLabel(f"Corner radius: {self.config['corner-radius']}")
-        self.corner_slider = QSlider(Qt.Orientation.Horizontal)
-        self.corner_slider.setRange(0, 50)
-        self.corner_slider.setValue(int(self.config['corner-radius']))
-        self.corner_slider.valueChanged.connect(lambda val: self.corner_label.setText(f"Corner radius: {val}"))
-        self.layout.addWidget(self.corner_label)
-        self.layout.addWidget(self.corner_slider)
-
-        # --- Fading checkbox ---
-        self.fade_checkbox = QCheckBox("Enable fade")
-        self.fade_checkbox.setChecked(self.config['fading'])
-        self.layout.addWidget(self.fade_checkbox)
-
-        # --- Transparency rules button ---
-        self.transparency_btn = QPushButton("Edit transparency rules")
-        self.transparency_btn.clicked.connect(self.edit_transparency)
-        self.layout.addWidget(self.transparency_btn)
-
-        # --- Save button ---
-        self.save_btn = QPushButton("Save Picom Config")
-        self.save_btn.clicked.connect(self.save_config)
-        self.layout.addWidget(self.save_btn)
+        self.load_config()
+        self.init_ui()
 
     def load_config(self):
-        """Load picom.conf or return defaults"""
-        defaults = {
-            "blur-radius": "10",
-            "shadow-opacity": "0.75",
-            "corner-radius": "5",
-            "fading": True,
-            "transparency-rules": []
-        }
-        if not os.path.exists(self.config_file):
-            return defaults
-
-        config_dict = defaults.copy()
-        with open(self.config_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("#") or line == "":
-                    continue
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if key in config_dict:
-                        if key == "fading":
-                            config_dict[key] = value.lower() in ("true", "yes", "1")
-                        else:
-                            config_dict[key] = value
-        return config_dict
-
-    def edit_transparency(self):
-        # This can pop up a dialog to edit rules, for now we just mock
-        print("Transparency rules editor would open here!")
+        if not os.path.isfile(self.config_path):
+            QMessageBox.warning(self, "Picom config not found",
+                                f"Could not find Picom config at {self.config_path}.")
+            return
+        with open(self.config_path, "r") as f:
+            lines = f.readlines()
+        # Simple parser: expects lines like `blur-background = true` or `shadow-radius = 10`
+        self.config_data = {}
+        for line in lines:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                self.config_data[key.strip()] = value.strip()
 
     def save_config(self):
-        with open(self.config_file, "w") as f:
-            f.write(f"blur-radius = {self.blur_slider.value()}\n")
-            f.write(f"shadow-opacity = {self.shadow_slider.value()/100:.2f}\n")
-            f.write(f"corner-radius = {self.corner_slider.value()}\n")
-            f.write(f"fading = {'true' if self.fade_checkbox.isChecked() else 'false'}\n")
-            # Here you would write transparency rules too
-        print(f"Saved config to {self.config_file}")
+        if not self.config_path:
+            return
+        with open(self.config_path, "w") as f:
+            for key, value in self.config_data.items():
+                f.write(f"{key} = {value}\n")
+        QMessageBox.information(self, "Saved", "Picom config saved successfully!")
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Blur slider
+        self.blur_slider = self.create_slider("Blur radius", "blur-radius", 0, 50)
+        layout.addLayout(self.blur_slider)
+
+        # Shadow slider
+        self.shadow_slider = self.create_slider("Shadow radius", "shadow-radius", 0, 50)
+        layout.addLayout(self.shadow_slider)
+
+        # Rounded corners slider
+        self.rounded_slider = self.create_slider("Corner radius", "corner-radius", 0, 50)
+        layout.addLayout(self.rounded_slider)
+
+        # Fade transitions slider
+        self.fade_slider = self.create_slider("Fade duration", "fading", 0, 1000)
+        layout.addLayout(self.fade_slider)
+
+        # Transparency slider
+        self.transparency_slider = self.create_slider("Inactive opacity", "inactive-opacity", 0, 100)
+        layout.addLayout(self.transparency_slider)
+
+        # Save button
+        save_btn = QPushButton("Save Config")
+        save_btn.clicked.connect(self.save_config)
+        layout.addWidget(save_btn)
+
+        self.setLayout(layout)
+
+    def create_slider(self, label_text, key, min_val, max_val):
+        layout = QHBoxLayout()
+        label = QLabel(label_text)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(min_val, max_val)
+        if key in self.config_data:
+            try:
+                slider.setValue(int(float(self.config_data[key])))
+            except ValueError:
+                slider.setValue(min_val)
+        slider.valueChanged.connect(lambda val, k=key: self.update_config(k, val))
+        layout.addWidget(label)
+        layout.addWidget(slider)
+        return layout
+
+    def update_config(self, key, value):
+        self.config_data[key] = str(value)
+
+
+if __name__ == "__main__":
+    app = QApplication([])
+    editor = PicomEditor()
+    editor.show()
+    app.exec()
