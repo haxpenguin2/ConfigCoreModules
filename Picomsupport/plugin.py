@@ -1,77 +1,77 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QDoubleSpinBox, QCheckBox, QPushButton, QSlider, QHBoxLayout
+# Picom plugin for GUIconfigcore
+# Compatible with your GUI core
 
-# Dummy ConfigFile loader you already have
-from config_core import ConfigFile
+# Use the core’s ConfigFile (absolute import)
+from GUIconfigcore import ConfigFile
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QDoubleSpinBox, QPushButton
+)
 
 class EditorWidget(QWidget):
-    def __init__(self, config_path):
+    def __init__(self, core_config):
         super().__init__()
-        self.config = ConfigFile(config_path)
-        self.settings = self._load_settings()
+        self.core_config = core_config
+        self.config_path = core_config.config_path  # path to picom.conf
+        self.settings = {}
+        self.load_config()
         self.init_ui()
 
-    def _load_settings(self):
-        """Load config values safely, convert numbers where needed."""
-        s = self.config.get_all()  # returns dict of config
-        safe_settings = {}
-
-        # Opacity/fade values
-        for key in ["inactive-opacity", "active-opacity", "frame-opacity",
-                    "fade-in-step", "fade-out-step", "fade-delta", "blur-strength",
-                    "corner-radius", "shadow-radius", "shadow-opacity"]:
-            val = s.get(key, 0)
-            try:
-                safe_settings[key] = float(val)
-            except (ValueError, TypeError):
-                safe_settings[key] = 0.0
-
-        # Booleans
-        for key in ["fading", "blur-enabled", "shadow-enabled", "rounded-corners", "vsync"]:
-            val = s.get(key, "false")
-            safe_settings[key] = str(val).lower() in ["1", "true", "yes"]
-
-        return safe_settings
+    def load_config(self):
+        # Load Picom config using core’s ConfigFile
+        cf = ConfigFile(self.config_path)
+        self.settings = {
+            "inactive-opacity": float(cf.get("inactive-opacity", 0.7)),
+            "active-opacity": float(cf.get("active-opacity", 1.0)),
+            "fade-in-step": float(cf.get("fade-in-step", 0.03)),
+            "fade-out-step": float(cf.get("fade-out-step", 0.03)),
+        }
 
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # Example: inactive opacity
-        layout.addWidget(QLabel("Inactive Opacity"))
+        # Inactive opacity
+        layout.addWidget(QLabel("Inactive window opacity"))
         self.inactive_opacity_spin = QDoubleSpinBox()
         self.inactive_opacity_spin.setRange(0.0, 1.0)
-        self.inactive_opacity_spin.setSingleStep(0.01)
-        self.inactive_opacity_spin.setValue(self.settings.get("inactive-opacity", 0.7))
+        self.inactive_opacity_spin.setSingleStep(0.05)
+        self.inactive_opacity_spin.setValue(self.settings["inactive-opacity"])
         layout.addWidget(self.inactive_opacity_spin)
 
         # Active opacity
-        layout.addWidget(QLabel("Active Opacity"))
+        layout.addWidget(QLabel("Active window opacity"))
         self.active_opacity_spin = QDoubleSpinBox()
         self.active_opacity_spin.setRange(0.0, 1.0)
-        self.active_opacity_spin.setSingleStep(0.01)
-        self.active_opacity_spin.setValue(self.settings.get("active-opacity", 1.0))
+        self.active_opacity_spin.setSingleStep(0.05)
+        self.active_opacity_spin.setValue(self.settings["active-opacity"])
         layout.addWidget(self.active_opacity_spin)
 
-        # Fading checkbox
-        self.fading_checkbox = QCheckBox("Enable Fading")
-        self.fading_checkbox.setChecked(self.settings.get("fading", True))
-        layout.addWidget(self.fading_checkbox)
+        # Fade-in step
+        layout.addWidget(QLabel("Fade-in step"))
+        self.fade_in_spin = QDoubleSpinBox()
+        self.fade_in_spin.setRange(0.0, 1.0)
+        self.fade_in_spin.setSingleStep(0.01)
+        self.fade_in_spin.setValue(self.settings["fade-in-step"])
+        layout.addWidget(self.fade_in_spin)
 
-        # Rounded corners
-        self.rounded_checkbox = QCheckBox("Rounded Corners")
-        self.rounded_checkbox.setChecked(self.settings.get("rounded-corners", True))
-        layout.addWidget(self.rounded_checkbox)
+        # Fade-out step
+        layout.addWidget(QLabel("Fade-out step"))
+        self.fade_out_spin = QDoubleSpinBox()
+        self.fade_out_spin.setRange(0.0, 1.0)
+        self.fade_out_spin.setSingleStep(0.01)
+        self.fade_out_spin.setValue(self.settings["fade-out-step"])
+        layout.addWidget(self.fade_out_spin)
 
         # Save button
-        save_btn = QPushButton("Save Config")
+        save_btn = QPushButton("Save Picom Config")
         save_btn.clicked.connect(self.save_config)
         layout.addWidget(save_btn)
 
         self.setLayout(layout)
 
     def save_config(self):
-        """Write changes back to config safely"""
-        self.config.set("inactive-opacity", str(self.inactive_opacity_spin.value()))
-        self.config.set("active-opacity", str(self.active_opacity_spin.value()))
-        self.config.set("fading", str(self.fading_checkbox.isChecked()).lower())
-        self.config.set("rounded-corners", str(self.rounded_checkbox.isChecked()).lower())
-        self.config.write()  # commits changes to file
+        cf = ConfigFile(self.config_path)
+        cf.set("inactive-opacity", str(self.inactive_opacity_spin.value()))
+        cf.set("active-opacity", str(self.active_opacity_spin.value()))
+        cf.set("fade-in-step", str(self.fade_in_spin.value()))
+        cf.set("fade-out-step", str(self.fade_out_spin.value()))
+        cf.save()
