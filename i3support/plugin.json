@@ -1,7 +1,9 @@
 {
   "name": "i3 Editor Plugin",
-  "version": "0.2.0",
+  "slug": "i3_plugin",
+  "version": "0.1.0",
   "min_core_version": "0.2.0",
-  "description": "Editor for i3 config format",
-  "author": "haxpenguin2"
+  "description": "Editor for i3 config (bindsym/startup editor)",
+  "author": "haxpenguin2",
+  "homepage": "https://github.com/haxpenguin2/ConfigCoreModules/tree/main/i3_plugin"
 }
