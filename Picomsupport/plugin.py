@@ -1,195 +1,156 @@
 # ~/.config_editor_packages/Picomsupport/plugin.py
-from PyQt6.QtWidgets import *
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QMessageBox, QLineEdit
+)
 from PyQt6.QtCore import Qt
-from pathlib import Path
-import re
 
 class EditorWidget(QWidget):
-    def __init__(self, config=None):
+    def __init__(self, config):
+        """
+        `config` is a ConfigFile object passed from CoreGUI
+        """
         super().__init__()
-        # Path to picom config
-        self.config_path = Path.home() / ".config/picom.conf"
-        self.lines = []
+        self.config = config
         self.init_ui()
-        self.load_config()
 
+    # ---------------------------
+    # Config parsing helpers
+    # ---------------------------
+    def _find_key_line(self, key):
+        """
+        Returns the index of the line where `key` is set.
+        Returns None if not found.
+        """
+        for i, line in enumerate(self.config.lines):
+            if line.strip().startswith(f"{key}"):
+                return i
+        return None
+
+    def get_value(self, key, default=None):
+        idx = self._find_key_line(key)
+        if idx is None:
+            return default
+        line = self.config.lines[idx]
+        # remove key, =, ;, whitespace
+        val = line.split("=", 1)[-1].strip().rstrip(";")
+        # convert bools
+        if val.lower() == "true":
+            return True
+        elif val.lower() == "false":
+            return False
+        try:
+            return float(val)
+        except Exception:
+            return val.strip('"')
+
+    def set_value(self, key, value):
+        idx = self._find_key_line(key)
+        line_value = f"{key} = {str(value).lower()};" if isinstance(value, bool) else f'{key} = {value};'
+        if idx is not None:
+            lw = self.config.lines[idx][:len(self.config.lines[idx]) - len(self.config.lines[idx].lstrip())]
+            self.config.lines[idx] = lw + line_value
+        else:
+            self.config.append_line(line_value)
+
+    # ---------------------------
+    # Blur block helpers
+    # ---------------------------
+    def get_blur_strength(self):
+        in_block = False
+        for line in self.config.lines:
+            stripped = line.strip()
+            if stripped.startswith("blur") and "{" in stripped:
+                in_block = True
+            elif in_block:
+                if stripped.startswith("strength"):
+                    val = stripped.split("=")[-1].strip().rstrip(";")
+                    try:
+                        return int(val)
+                    except:
+                        return 5
+                elif stripped.startswith("};"):
+                    break
+        return 5
+
+    def set_blur_strength(self, val):
+        in_block = False
+        for i, line in enumerate(self.config.lines):
+            stripped = line.strip()
+            if stripped.startswith("blur") and "{" in stripped:
+                in_block = True
+            elif in_block:
+                if stripped.startswith("strength"):
+                    lw = line[:len(line) - len(line.lstrip())]
+                    self.config.lines[i] = f"{lw}strength = {val};"
+                    return
+
+    # ---------------------------
+    # UI
+    # ---------------------------
     def init_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        # Backend
-        layout.addWidget(QLabel("Backend:"))
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["xrender", "glx", "xr_glx_hybrid"])
-        layout.addWidget(self.backend_combo)
+        # Opacity sliders
+        self.inactive_opacity_slider = self._create_slider("inactive-opacity", 0.0, 1.0, 0.01)
+        layout.addLayout(self.inactive_opacity_slider)
 
-        # VSync
-        self.vsync_checkbox = QCheckBox("Enable VSync")
-        layout.addWidget(self.vsync_checkbox)
+        self.active_opacity_slider = self._create_slider("active-opacity", 0.0, 1.0, 0.01)
+        layout.addLayout(self.active_opacity_slider)
 
-        # Rounded corners
-        layout.addWidget(QLabel("Corner Radius:"))
-        self.corner_spin = QSpinBox()
-        self.corner_spin.setRange(0, 100)
-        layout.addWidget(self.corner_spin)
+        # Blur strength
+        blur_label = QLabel("Blur strength")
+        layout.addWidget(blur_label)
+        self.blur_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blur_slider.setMinimum(0)
+        self.blur_slider.setMaximum(20)
+        self.blur_slider.setValue(self.get_blur_strength())
+        self.blur_slider.valueChanged.connect(self._on_blur_change)
+        layout.addWidget(self.blur_slider)
 
-        # Opacity
-        layout.addWidget(QLabel("Inactive Opacity:"))
-        self.inactive_opacity = QDoubleSpinBox()
-        self.inactive_opacity.setRange(0.0, 1.0)
-        self.inactive_opacity.setSingleStep(0.05)
-        layout.addWidget(self.inactive_opacity)
+        # Corner radius
+        self.corner_slider = self._create_slider("corner-radius", 0, 50, 1)
+        layout.addLayout(self.corner_slider)
 
-        layout.addWidget(QLabel("Active Opacity:"))
-        self.active_opacity = QDoubleSpinBox()
-        self.active_opacity.setRange(0.0, 1.0)
-        self.active_opacity.setSingleStep(0.05)
-        layout.addWidget(self.active_opacity)
+        # Fade step
+        self.fade_in_slider = self._create_slider("fade-in-step", 0.0, 0.1, 0.01)
+        layout.addLayout(self.fade_in_slider)
 
-        layout.addWidget(QLabel("Frame Opacity:"))
-        self.frame_opacity = QDoubleSpinBox()
-        self.frame_opacity.setRange(0.0, 1.0)
-        self.frame_opacity.setSingleStep(0.05)
-        layout.addWidget(self.frame_opacity)
-
-        # Fade
-        self.fading_checkbox = QCheckBox("Enable fading")
-        layout.addWidget(self.fading_checkbox)
-
-        layout.addWidget(QLabel("Fade in step:"))
-        self.fade_in = QDoubleSpinBox()
-        self.fade_in.setRange(0.0, 1.0)
-        self.fade_in.setSingleStep(0.01)
-        layout.addWidget(self.fade_in)
-
-        layout.addWidget(QLabel("Fade out step:"))
-        self.fade_out = QDoubleSpinBox()
-        self.fade_out.setRange(0.0, 1.0)
-        self.fade_out.setSingleStep(0.01)
-        layout.addWidget(self.fade_out)
-
-        layout.addWidget(QLabel("Fade delta (ms):"))
-        self.fade_delta = QSpinBox()
-        self.fade_delta.setRange(1, 1000)
-        layout.addWidget(self.fade_delta)
-
-        # Blur
-        self.blur_checkbox = QCheckBox("Enable Blur")
-        layout.addWidget(self.blur_checkbox)
-        layout.addWidget(QLabel("Blur strength:"))
-        self.blur_strength = QSpinBox()
-        self.blur_strength.setRange(1, 50)
-        layout.addWidget(self.blur_strength)
-
-        # Shadows
-        self.shadow_checkbox = QCheckBox("Enable Shadows")
-        layout.addWidget(self.shadow_checkbox)
-        layout.addWidget(QLabel("Shadow radius:"))
-        self.shadow_radius = QSpinBox()
-        self.shadow_radius.setRange(0, 50)
-        layout.addWidget(self.shadow_radius)
-        layout.addWidget(QLabel("Shadow opacity:"))
-        self.shadow_opacity = QDoubleSpinBox()
-        self.shadow_opacity.setRange(0.0, 1.0)
-        self.shadow_opacity.setSingleStep(0.01)
-        layout.addWidget(self.shadow_opacity)
+        self.fade_out_slider = self._create_slider("fade-out-step", 0.0, 0.1, 0.01)
+        layout.addLayout(self.fade_out_slider)
 
         # Save button
         save_btn = QPushButton("Save Config")
         save_btn.clicked.connect(self.save_config)
         layout.addWidget(save_btn)
 
-    def load_config(self):
-        if not self.config_path.exists():
-            return
+    # ---------------------------
+    # Slider helpers
+    # ---------------------------
+    def _create_slider(self, key, min_val, max_val, step):
+        layout = QHBoxLayout()
+        label = QLabel(f"{key}: {self.get_value(key, 0)}")
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setMinimum(int(min_val / step))
+        slider.setMaximum(int(max_val / step))
+        slider.setValue(int(self.get_value(key, 0) / step))
+        slider.valueChanged.connect(lambda v, k=key, s=slider, st=step, l=label: self._on_slider_change(k, v, s, st, l))
+        layout.addWidget(label)
+        layout.addWidget(slider)
+        return layout
 
-        with open(self.config_path, "r") as f:
-            self.lines = f.readlines()
+    def _on_slider_change(self, key, value, slider, step, label):
+        real_val = value * step
+        self.set_value(key, real_val)
+        label.setText(f"{key}: {real_val}")
 
-        for line in self.lines:
-            line_clean = line.split("#")[0].strip()  # remove comments
-            if not line_clean:
-                continue
-            if "backend" in line_clean:
-                for i in range(self.backend_combo.count()):
-                    if self.backend_combo.itemText(i) in line_clean:
-                        self.backend_combo.setCurrentIndex(i)
-            elif "vsync" in line_clean:
-                self.vsync_checkbox.setChecked("true" in line_clean)
-            elif "corner-radius" in line_clean:
-                m = re.search(r'(\d+)', line_clean)
-                if m: self.corner_spin.setValue(int(m.group(1)))
-            elif "inactive-opacity" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.inactive_opacity.setValue(float(m.group(1)))
-            elif "active-opacity" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.active_opacity.setValue(float(m.group(1)))
-            elif "frame-opacity" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.frame_opacity.setValue(float(m.group(1)))
-            elif "fading" in line_clean:
-                self.fading_checkbox.setChecked("true" in line_clean)
-            elif "fade-in-step" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.fade_in.setValue(float(m.group(1)))
-            elif "fade-out-step" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.fade_out.setValue(float(m.group(1)))
-            elif "fade-delta" in line_clean:
-                m = re.search(r'(\d+)', line_clean)
-                if m: self.fade_delta.setValue(int(m.group(1)))
-            elif "strength" in line_clean and "blur" in line_clean:
-                m = re.search(r'(\d+)', line_clean)
-                if m: self.blur_strength.setValue(int(m.group(1)))
-            elif "blur" in line_clean:
-                self.blur_checkbox.setChecked(True)
-            elif "shadow" in line_clean and "true" in line_clean:
-                self.shadow_checkbox.setChecked(True)
-            elif "shadow-radius" in line_clean:
-                m = re.search(r'(\d+)', line_clean)
-                if m: self.shadow_radius.setValue(int(m.group(1)))
-            elif "shadow-opacity" in line_clean:
-                m = re.search(r'([0-9.]+)', line_clean)
-                if m: self.shadow_opacity.setValue(float(m.group(1)))
+    def _on_blur_change(self, value):
+        self.set_blur_strength(value)
 
+    # ---------------------------
+    # Save
+    # ---------------------------
     def save_config(self):
-        new_lines = []
-        for line in self.lines:
-            line_clean = line.split("#")[0].strip()
-            if "backend" in line_clean:
-                new_lines.append(f'backend = "{self.backend_combo.currentText()}";\n')
-            elif "vsync" in line_clean:
-                new_lines.append(f'vsync = {"true" if self.vsync_checkbox.isChecked() else "false"};\n')
-            elif "corner-radius" in line_clean:
-                new_lines.append(f'corner-radius = {self.corner_spin.value()};\n')
-            elif "inactive-opacity" in line_clean:
-                new_lines.append(f'inactive-opacity = {self.inactive_opacity.value()};\n')
-            elif "active-opacity" in line_clean:
-                new_lines.append(f'active-opacity = {self.active_opacity.value()};\n')
-            elif "frame-opacity" in line_clean:
-                new_lines.append(f'frame-opacity = {self.frame_opacity.value()};\n')
-            elif "fading" in line_clean:
-                new_lines.append(f'fading = {"true" if self.fading_checkbox.isChecked() else "false"};\n')
-            elif "fade-in-step" in line_clean:
-                new_lines.append(f'fade-in-step = {self.fade_in.value()};\n')
-            elif "fade-out-step" in line_clean:
-                new_lines.append(f'fade-out-step = {self.fade_out.value()};\n')
-            elif "fade-delta" in line_clean:
-                new_lines.append(f'fade-delta = {self.fade_delta.value()};\n')
-            elif "strength" in line_clean and "blur" in line_clean:
-                new_lines.append(f'    strength = {self.blur_strength.value()};\n')
-            elif "blur" in line_clean:
-                new_lines.append("blur:\n{\n")
-            elif "shadow" in line_clean and "true" in line_clean:
-                new_lines.append(f'shadow = {"true" if self.shadow_checkbox.isChecked() else "false"};\n')
-            elif "shadow-radius" in line_clean:
-                new_lines.append(f'shadow-radius = {self.shadow_radius.value()};\n')
-            elif "shadow-opacity" in line_clean:
-                new_lines.append(f'shadow-opacity = {self.shadow_opacity.value()};\n')
-            else:
-                new_lines.append(line)
-
-        # Save safely
-        with open(self.config_path, "w") as f:
-            f.writelines(new_lines)
+        backup = self.config.save(backup=True)
+        QMessageBox.information(self, "Saved", f"Config saved!\nBackup: {backup}")
