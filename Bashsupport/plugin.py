@@ -1,11 +1,12 @@
 import os
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QSlider, QPushButton, QCheckBox
+from PyQt5.QtCore import Qt
 
 class EditorWidget(QWidget):
     def __init__(self, config=None):
         super().__init__()
 
-        # Core passes `config` as a dict sometimes, but we only need ~/.bashrc
+        # path to ~/.bashrc
         self.config_path = os.path.expanduser("~/.bashrc")
         self.lines = []
         self._load_config()
@@ -16,9 +17,7 @@ class EditorWidget(QWidget):
         self._widgets = {}
         self._init_ui()
 
-    # -------------------------------
-    # Load existing .bashrc
-    # -------------------------------
+    # Load existing .bashrc lines
     def _load_config(self):
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
@@ -26,14 +25,11 @@ class EditorWidget(QWidget):
         else:
             self.lines = []
 
-    # -------------------------------
-    # UI initialization
-    # -------------------------------
+    # Build the UI
     def _init_ui(self):
-        # PS1 brightness slider
+        # Prompt brightness slider
         self.layout.addWidget(QLabel("Prompt brightness (0-100)"))
-        slider = QSlider()
-        slider.setOrientation(1)  # Horizontal
+        slider = QSlider(Qt.Horizontal)
         slider.setMinimum(0)
         slider.setMaximum(100)
         slider.setValue(self._get_ps1_brightness())
@@ -51,9 +47,7 @@ class EditorWidget(QWidget):
         save_btn.clicked.connect(self.save_config)
         self.layout.addWidget(save_btn)
 
-    # -------------------------------
-    # Helpers to parse existing .bashrc
-    # -------------------------------
+    # Get PS1_BRIGHTNESS from .bashrc
     def _get_ps1_brightness(self):
         for line in self.lines:
             if line.startswith("export PS1_BRIGHTNESS="):
@@ -63,15 +57,14 @@ class EditorWidget(QWidget):
                     return 50
         return 50
 
+    # Check if ls alias is present
     def _get_ls_alias(self):
         for line in self.lines:
             if line.startswith("alias ls="):
                 return True
         return False
 
-    # -------------------------------
-    # Save changes
-    # -------------------------------
+    # Save changes to .bashrc
     def save_config(self):
         new_lines = []
         brightness_set = False
@@ -88,13 +81,13 @@ class EditorWidget(QWidget):
             else:
                 new_lines.append(line)
 
-        # Add missing lines if they weren’t present
+        # Add missing lines if not present
         if not brightness_set:
             new_lines.append(f"\nexport PS1_BRIGHTNESS={self._widgets['prompt_brightness'].value()}\n")
         if self._widgets['ls_alias'].isChecked() and not ls_set:
             new_lines.append("\nalias ls='ls --color=auto'\n")
 
-        # Write back safely
+        # Write safely
         with open(self.config_path, "w") as f:
             f.writelines(new_lines)
 
