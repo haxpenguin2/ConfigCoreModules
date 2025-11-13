@@ -1,108 +1,33 @@
 #!/usr/bin/env python3
 """
-Picom Editor plugin for ConfigCore
-Parses real Picom config syntax and populates sliders/checkboxes correctly.
+Picom Config Editor Plugin for ConfigCore
 """
 
+import os
+import re
+from pathlib import Path
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout, QPushButton, QCheckBox, QMessageBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
+    QPushButton, QCheckBox, QMessageBox, QComboBox
 )
 from PyQt6.QtCore import Qt
-from pathlib import Path
-import re
+
+# Ensure we can import the core ConfigFile
+try:
+    from config_core import ConfigFile
+except ImportError:
+    # fallback if plugin is loaded standalone
+    from ..config_core import ConfigFile
 
 class EditorWidget(QWidget):
-    def __init__(self, config=None):
+    def __init__(self, config: ConfigFile = None):
         super().__init__()
-
-        # Load ConfigFile from core, or default to picom.conf
-        if config:
-            self.cf = config
-        else:
-            from config_core import ConfigFile
-            picom_path = Path.home() / ".config/picom.conf"
-            self.cf = ConfigFile(str(picom_path)) if picom_path.exists() else None
-
-        # Settings to display/edit: name -> type
-        self.settings_defs = {
-            "corner-radius": "int",
-            "inactive-opacity": "float",
-            "active-opacity": "float",
-            "frame-opacity": "float",
-            "fade-in-step": "float",
-            "fade-out-step": "float",
-            "fade-delta": "int",
-            "fading": "bool",
-            "shadow": "bool",
-            "shadow-radius": "int",
-            "shadow-opacity": "float",
-            "blur-method": "str",
-            "blur-strength": "int"
-        }
-
-        # Load current values
-        self.settings = self._parse_config()
-
-        self.setStyleSheet("""
-            QWidget { background: #071018; color: #dbe7f5; font-family: 'Segoe UI', Roboto, sans-serif; }
-            QLabel { font-size: 12pt; }
-            QSlider::handle:horizontal { background: #5c5cff; border-radius: 8px; width: 16px; }
-            QSlider::groove:horizontal { height: 10px; background: #444; border-radius: 5px; }
-            QPushButton { background-color: #5c5cff; border-radius: 5px; padding: 5px; color: #e6eef8; }
-            QPushButton:hover { background-color: #4545ff; }
-            QCheckBox { padding: 2px; }
-        """)
-
-        self.init_ui()
-
-    def _parse_config(self):
-        vals = {}
-        if not self.cf:
-            return vals
-
-        lines = self.cf.lines
-        in_blur_block = False
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-
-            # Detect blur block
-            if stripped.startswith("blur:"):
-                in_blur_block = True
-                continue
-            if in_blur_block:
-                if stripped.startswith("}"):
-                    in_blur_block = False
-                    continue
-                # parse method or strength
-                m = re.match(r'method\s*=\s*["\']?(\w+)["\']?;', stripped)
-                if m:
-                    vals["blur-method"] = m.group(1)
-                m2 = re.match(r'strength\s*=\s*(\d+);', stripped)
-                if m2:
-                    vals["blur-strength"] = int(m2.group(1))
-                continue
-
-            # parse key = value;
-            m = re.match(r'(\w[\w-]*)\s*=\s*(.*);', stripped)
-            if m:
-                key, val = m.groups()
-                key = key.strip()
-                val = val.strip()
-                if key in self.settings_defs:
-                    t = self.settings_defs[key]
-                    if t == "int":
-                        vals[key] = int(float(val))
-                    elif t == "float":
-                        vals[key] = float(val)
-                    elif t == "bool":
-                        vals[key] = val.lower() in ("true", "1")
-                    elif t == "str":
-                        vals[key] = val.strip('"').strip("'")
-        # set defaults for missing keys
-        defaults = {
-            "corner-radius": 10,
+        self.cf_path = os.path.expanduser("~/.config/picom.conf")
+        self.cf = None
+        self.settings = {
+            "backend": "glx",
+            "vsync": True,
+            "corner-radius": 0,
             "inactive-opacity": 0.7,
             "active-opacity": 1.0,
             "frame-opacity": 1.0,
@@ -110,137 +35,162 @@ class EditorWidget(QWidget):
             "fade-out-step": 0.03,
             "fade-delta": 10,
             "fading": True,
+            "blur-method": "dual_kawase",
+            "blur-strength": 5,
             "shadow": True,
             "shadow-radius": 12,
             "shadow-opacity": 0.25,
-            "blur-method": "dual_kawase",
-            "blur-strength": 5
         }
-        for k, v in defaults.items():
-            if k not in vals:
-                vals[k] = v
 
-        return vals
+        self.load_config()
+        self.build_ui()
 
-    def init_ui(self):
+    def load_config(self):
+        if os.path.isfile(self.cf_path):
+            try:
+                self.cf = ConfigFile(self.cf_path)
+                for line in self.cf.lines:
+                    s = line.strip()
+                    if s.startswith("#") or not s:
+                        continue
+                    # blur block
+                    if "blur" in s or s.startswith("{") or s.startswith("}"):
+                        continue
+                    m = re.match(r'([\w-]+)\s*=\s*(.*);', s)
+                    if m:
+                        key = m.group(1).strip()
+                        val = m.group(2).strip().strip('"')
+                        if key in self.settings:
+                            if val.lower() in ("true", "false"):
+                                self.settings[key] = val.lower() == "true"
+                            else:
+                                try:
+                                    self.settings[key] = float(val)
+                                except:
+                                    self.settings[key] = val
+            except Exception as e:
+                print("Failed to load picom config:", e)
+
+    def build_ui(self):
         layout = QVBoxLayout()
-        self.sliders = {}
-        self.checkboxes = {}
+        self.setLayout(layout)
 
-        # Numeric sliders
-        num_sliders = {
-            "corner-radius": (0, 50),
-            "inactive-opacity": (0, 100),  # scale 0-100
-            "active-opacity": (0, 100),
-            "frame-opacity": (0, 100),
-            "fade-in-step": (0, 100),      # scale 0-1 to 0-100
-            "fade-out-step": (0, 100),
-            "fade-delta": (0, 100),
-            "shadow-radius": (0, 50),
-            "shadow-opacity": (0, 100),
-            "blur-strength": (0, 50)
-        }
+        # Backend selector
+        backend_layout = QHBoxLayout()
+        backend_layout.addWidget(QLabel("Backend:"))
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["glx", "xrender"])
+        self.backend_combo.setCurrentText(self.settings["backend"])
+        backend_layout.addWidget(self.backend_combo)
+        layout.addLayout(backend_layout)
 
-        for key, (mn, mx) in num_sliders.items():
-            val = self.settings[key]
-            if isinstance(val, float) and val <= 1:  # scale small floats
-                val = int(val * 100)
-            layout.addLayout(self.create_slider(key, mn, mx, val))
+        # Vsync checkbox
+        self.vsync_cb = QCheckBox("Vsync")
+        self.vsync_cb.setChecked(self.settings["vsync"])
+        layout.addWidget(self.vsync_cb)
 
-        # Boolean checkboxes
-        bool_keys = ["fading", "shadow"]
-        for key in bool_keys:
-            chk = QCheckBox(key)
-            chk.setChecked(self.settings[key])
-            chk.stateChanged.connect(lambda state, k=key: self.on_checkbox_change(k, state))
-            layout.addWidget(chk)
-            self.checkboxes[key] = chk
+        # Corner radius
+        layout.addLayout(self._make_slider("Corner radius", "corner-radius", 0, 50))
 
-        # Blur method dropdown (simplified for now)
-        # You could extend to QComboBox if desired
-        lbl = QLabel(f"Blur method: {self.settings['blur-method']}")
-        layout.addWidget(lbl)
-        self.blur_label = lbl
+        # Opacity
+        layout.addLayout(self._make_slider("Inactive opacity", "inactive-opacity", 0, 100, True))
+        layout.addLayout(self._make_slider("Active opacity", "active-opacity", 0, 100, True))
+        layout.addLayout(self._make_slider("Frame opacity", "frame-opacity", 0, 100, True))
 
+        # Fade settings
+        layout.addLayout(self._make_slider("Fade in step", "fade-in-step", 1, 100, True, scale=0.01))
+        layout.addLayout(self._make_slider("Fade out step", "fade-out-step", 1, 100, True, scale=0.01))
+        layout.addLayout(self._make_slider("Fade delta (ms)", "fade-delta", 1, 50))
+        self.fading_cb = QCheckBox("Enable fading")
+        self.fading_cb.setChecked(self.settings["fading"])
+        layout.addWidget(self.fading_cb)
+
+        # Blur method
+        blur_layout = QHBoxLayout()
+        blur_layout.addWidget(QLabel("Blur method:"))
+        self.blur_method_combo = QComboBox()
+        self.blur_method_combo.addItems(["none", "kawase", "dual_kawase", "box", "gaussian"])
+        self.blur_method_combo.setCurrentText(self.settings["blur-method"])
+        blur_layout.addWidget(self.blur_method_combo)
+        layout.addLayout(blur_layout)
+
+        # Blur strength
+        layout.addLayout(self._make_slider("Blur strength", "blur-strength", 0, 50))
+
+        # Shadows
+        self.shadow_cb = QCheckBox("Enable shadows")
+        self.shadow_cb.setChecked(self.settings["shadow"])
+        layout.addWidget(self.shadow_cb)
+        layout.addLayout(self._make_slider("Shadow radius", "shadow-radius", 0, 50))
+        layout.addLayout(self._make_slider("Shadow opacity", "shadow-opacity", 0, 100, True))
+
+        # Save button
         save_btn = QPushButton("Save Picom Config")
         save_btn.clicked.connect(self.save_config)
         layout.addWidget(save_btn)
-        self.setLayout(layout)
 
-    def create_slider(self, key, min_val, max_val, init_val):
-        layout = QHBoxLayout()
-        lbl = QLabel(f"{key}: {init_val}")
-        sld = QSlider(Qt.Orientation.Horizontal)
-        sld.setRange(min_val, max_val)
-        sld.setValue(init_val)
-        sld.valueChanged.connect(lambda v, k=key, l=lbl: self.on_slider_change(k, v, l))
-        layout.addWidget(lbl)
-        layout.addWidget(sld)
-        self.sliders[key] = sld
-        return layout
+        layout.addStretch()
 
-    def on_slider_change(self, key, value, label):
-        if key in ["inactive-opacity", "active-opacity", "frame-opacity", "fade-in-step", "fade-out-step", "shadow-opacity"]:
-            self.settings[key] = value / 100
+    def _make_slider(self, label, key, minv, maxv, is_float=False, scale=1.0):
+        lay = QHBoxLayout()
+        lay.addWidget(QLabel(label))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setMinimum(minv)
+        slider.setMaximum(maxv)
+        val = self.settings[key]
+        if is_float:
+            slider.setValue(int(val / scale))
+        else:
+            slider.setValue(int(val))
+        lbl = QLabel(str(val))
+        slider.valueChanged.connect(lambda v, k=key, l=lbl: self._slider_changed(v, k, l, is_float, scale))
+        lay.addWidget(slider)
+        lay.addWidget(lbl)
+        return lay
+
+    def _slider_changed(self, value, key, label, is_float, scale):
+        if is_float:
+            val = value * scale
+            self.settings[key] = val
+            label.setText(f"{val:.2f}")
         else:
             self.settings[key] = value
-        label.setText(f"{key}: {self.settings[key]}")
+            label.setText(str(value))
 
-    def on_checkbox_change(self, key, state):
-        self.settings[key] = state == Qt.CheckState.Checked
+    def save_config(self):
+        if not self.cf:
+            # Create a new file if it doesn't exist
+            try:
+                Path(self.cf_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(self.cf_path).touch()
+                self.cf = ConfigFile(self.cf_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Cannot create config file: {e}")
+                return
 
-def save_config(self):
-    if not self.cf:
-        QMessageBox.warning(self, "Error", "Picom config not loaded")
-        return
+        new_lines = []
+        new_lines.append(f'backend = "{self.backend_combo.currentText()}";')
+        new_lines.append(f'vsync = {"true" if self.vsync_cb.isChecked() else "false"};')
+        new_lines.append(f'corner-radius = {self.settings["corner-radius"]};')
+        new_lines.append(f'inactive-opacity = {self.settings["inactive-opacity"]:.2f};')
+        new_lines.append(f'active-opacity = {self.settings["active-opacity"]:.2f};')
+        new_lines.append(f'frame-opacity = {self.settings["frame-opacity"]:.2f};')
+        new_lines.append(f'fade-in-step = {self.settings["fade-in-step"]:.2f};')
+        new_lines.append(f'fade-out-step = {self.settings["fade-out-step"]:.2f};')
+        new_lines.append(f'fade-delta = {self.settings["fade-delta"]};')
+        new_lines.append(f'fading = {"true" if self.fading_cb.isChecked() else "false"};')
+        new_lines.append("blur:")
+        new_lines.append("{")
+        new_lines.append(f'    method = "{self.blur_method_combo.currentText()}";')
+        new_lines.append(f'    strength = {self.settings["blur-strength"]};')
+        new_lines.append("};")
+        new_lines.append(f'shadow = {"true" if self.shadow_cb.isChecked() else "false"};')
+        new_lines.append(f'shadow-radius = {self.settings["shadow-radius"]};')
+        new_lines.append(f'shadow-opacity = {self.settings["shadow-opacity"]:.2f};')
 
-    # Update lines with current settings
-    new_lines = []
-    in_blur = False
-    for line in self.cf.lines:
-        stripped = line.strip()
-        if stripped.startswith("blur:"):
-            in_blur = True
-            new_lines.append(line)
-            continue
-        if in_blur:
-            if stripped.startswith("}"):
-                in_blur = False
-                new_lines.append(line)
-                continue
-            # update blur settings
-            if "method" in stripped:
-                new_lines.append(f'    method = "{self.settings["blur-method"]}";')
-            elif "strength" in stripped:
-                new_lines.append(f'    strength = {self.settings["blur-strength"]};')
-            else:
-                new_lines.append(line)
-            continue
-
-        m = re.match(r'(\w[\w-]*)\s*=\s*(.*);', stripped)
-        if m:
-            key = m.group(1).strip()
-            if key in self.settings:
-                val = self.settings[key]
-                if isinstance(val, bool):
-                    val = "true" if val else "false"
-                elif isinstance(val, float):
-                    val = f"{val:.2f}"
-                new_lines.append(f"{key} = {val};")
-            else:
-                new_lines.append(line)
-        else:
-            new_lines.append(line)
-
-    # Write back to the actual config file
-    try:
-        self.cf.lines = new_lines
-        saved_path = self.cf.save(backup=True)  # saves and makes backup
-        QMessageBox.information(
-            self, "Saved", f"Picom config saved to:\n{self.cf.path}\nBackup: {saved_path}"
-        )
-    except Exception as e:
-        QMessageBox.critical(self, "Error", f"Failed to save Picom config: {e}")
-
-def create_editor(config=None):
-    return EditorWidget(config)
+        try:
+            self.cf.lines = new_lines
+            backup_path = self.cf.save(backup=True)
+            QMessageBox.information(self, "Saved", f"Picom config saved!\nBackup: {backup_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save Picom config: {e}")
