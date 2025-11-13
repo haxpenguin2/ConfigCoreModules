@@ -1,98 +1,87 @@
 import os
-import shutil
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QSlider, QLineEdit, QCheckBox, QPushButton, QApplication
-)
-from PyQt6.QtCore import Qt
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QSlider, QPushButton, QCheckBox, QHBoxLayout
 
 class EditorWidget(QWidget):
-    def __init__(self, config=None):
+    def __init__(self, config_path=None):
         super().__init__()
-        self.config = config
-        self.bashrc_path = os.path.expanduser("~/.bashrc")
+
+        self.config_path = os.path.expanduser("~/.bashrc")
         self.lines = []
-        self.editable_widgets = {}
-        self.load_bashrc()
+        self._load_config()
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self._widgets = {}
         self.init_ui()
 
-    def load_bashrc(self):
-        if os.path.exists(self.bashrc_path):
-            with open(self.bashrc_path, "r") as f:
+    def _load_config(self):
+        if os.path.exists(self.config_path):
+            with open(self.config_path, "r") as f:
                 self.lines = f.readlines()
         else:
             self.lines = []
 
     def init_ui(self):
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
+        # Example 1: PS1 prompt color brightness (0-100)
+        self.layout.addWidget(QLabel("Prompt brightness (0-100)"))
+        self._widgets['prompt_brightness'] = QSlider()
+        self._widgets['prompt_brightness'].setMinimum(0)
+        self._widgets['prompt_brightness'].setMaximum(100)
+        self._widgets['prompt_brightness'].setValue(self._get_ps1_brightness())
+        self.layout.addWidget(self._widgets['prompt_brightness'])
 
-        for i, line in enumerate(self.lines):
-            line_strip = line.strip()
-            if line_strip.startswith("# GUI_EDIT:"):
-                key = line_strip.split(":")[1].strip()
-                next_line = self.lines[i + 1].strip() if i + 1 < len(self.lines) else ""
-                widget = self.create_widget(key, next_line)
-                if widget:
-                    self.layout.addLayout(widget)
-                    self.editable_widgets[i + 1] = widget  # store line index
+        # Example 2: Enable 'ls' aliases
+        self._widgets['ls_alias'] = QCheckBox("Enable 'ls' color aliases")
+        self._widgets['ls_alias'].setChecked(self._get_ls_alias())
+        self.layout.addWidget(self._widgets['ls_alias'])
 
-        save_btn = QPushButton("Save Changes")
-        save_btn.clicked.connect(self.save_changes)
+        # Save button
+        save_btn = QPushButton("Save .bashrc")
+        save_btn.clicked.connect(self.save_config)
         self.layout.addWidget(save_btn)
 
-    def create_widget(self, key, value_line):
-        layout = QHBoxLayout()
-        layout.addWidget(QLabel(key))
+    # --- Helpers to parse current .bashrc ---
+    def _get_ps1_brightness(self):
+        for line in self.lines:
+            if line.startswith("export PS1_BRIGHTNESS="):
+                try:
+                    return int(line.strip().split("=")[1])
+                except:
+                    return 50
+        return 50
 
-        # Numeric slider
-        if "=" in value_line and value_line.split("=")[1].isdigit():
-            val = int(value_line.split("=")[1])
-            slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setMinimum(0)
-            slider.setMaximum(val*10 if val < 100 else val*2)
-            slider.setValue(val)
-            layout.addWidget(slider)
-            return layout
+    def _get_ls_alias(self):
+        for line in self.lines:
+            if line.startswith("alias ls="):
+                return True
+        return False
 
-        # Boolean toggle
-        elif value_line.startswith("set -o"):
-            cb = QCheckBox()
-            cb.setChecked("on" in value_line or "true" in value_line)
-            layout.addWidget(cb)
-            return layout
+    # --- Save changes ---
+    def save_config(self):
+        new_lines = []
+        brightness_set = False
+        ls_set = False
 
-        # Text line (aliases, PS1, etc)
-        else:
-            text_edit = QLineEdit(value_line)
-            layout.addWidget(text_edit)
-            return layout
+        for line in self.lines:
+            if line.startswith("export PS1_BRIGHTNESS="):
+                new_lines.append(f"export PS1_BRIGHTNESS={self._widgets['prompt_brightness'].value()}\n")
+                brightness_set = True
+            elif line.startswith("alias ls="):
+                if self._widgets['ls_alias'].isChecked():
+                    new_lines.append(line)
+                ls_set = True
+            else:
+                new_lines.append(line)
 
-    def save_changes(self):
-        # Backup
-        shutil.copy(self.bashrc_path, self.bashrc_path + ".bak")
+        # If not present, add new entries
+        if not brightness_set:
+            new_lines.append(f"\nexport PS1_BRIGHTNESS={self._widgets['prompt_brightness'].value()}\n")
+        if self._widgets['ls_alias'].isChecked() and not ls_set:
+            new_lines.append("\nalias ls='ls --color=auto'\n")
 
-        for index, layout in self.editable_widgets.items():
-            widget = layout.itemAt(1).widget()
-            if isinstance(widget, QSlider):
-                new_val = widget.value()
-                key = self.lines[index-1].strip().split(":")[1].strip()
-                self.lines[index] = f"{key}={new_val}\n"
-            elif isinstance(widget, QCheckBox):
-                key = self.lines[index-1].strip().split(":")[1].strip()
-                state = "on" if widget.isChecked() else "off"
-                self.lines[index] = f"set -o {key} {state}\n"
-            elif isinstance(widget, QLineEdit):
-                self.lines[index] = widget.text() + "\n"
+        # Write back safely
+        with open(self.config_path, "w") as f:
+            f.writelines(new_lines)
 
-        with open(self.bashrc_path, "w") as f:
-            f.writelines(self.lines)
-        print("Bashrc saved successfully!")
-
-# For testing standalone
-if __name__ == "__main__":
-    import sys
-    app = QApplication(sys.argv)
-    w = EditorWidget()
-    w.show()
-    sys.exit(app.exec())
+        print(".bashrc updated successfully!")
