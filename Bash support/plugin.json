@@ -1,0 +1,9 @@
+{
+    "name": "BashrcEditor",
+    "version": "1.0",
+    "author": "Alice",
+    "description": "Edit your ~/.bashrc with a safe GUI using sliders, checkboxes, and text fields.",
+    "main": "plugin.py",
+    "supported_files": ["~/.bashrc"],
+    "type": "editor"
+}
