@@ -149,4 +149,13 @@ class EditorWidget(QWidget):
         for name in ["inactive-opacity", "active-opacity", "frame-opacity"]:
             spin = getattr(self, f"{name.replace('-', '_')}_spin")
             self.config.set(name, str(spin.value()))
-        self.config.set("sha
+        self.config.set("shadow", "true" if self.shadow_checkbox.isChecked() else "false")
+        self.config.set("shadow-radius", str(int(self.shadow_radius_spin.value())))
+        self.config.set("shadow-opacity", str(self.shadow_opacity_spin.value()))
+        self.config.set("rounded-corners", "true" if self.rounded_checkbox.isChecked() else "false")
+        self.config.set("corner-radius", str(int(self.corner_radius_spin.value())))
+        self.config.set("fading", "true" if self.fading_checkbox.isChecked() else "false")
+        self.config.set("fade-in-step", str(self.fade_in_spin.value()))
+        self.config.set("fade-out-step", str(self.fade_out_spin.value()))
+        self.config.set("fade-delta", str(int(self.fade_delta_spin.value())))
+        self.config.save()
