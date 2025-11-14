@@ -1,11 +1,11 @@
-# plugin.py (updated)
+# plugin.py
 # BashSupport plugin — Startup Apps / Appearance / Misc / Keybindings
-# Compatible with your GUI core: EditorWidget(core_config=None)
+# Uses core_config only if it clearly refers to a bash-like file (fix requested).
 
 import os, shutil, re
 from pathlib import Path
 
-# Try PyQt6 then PyQt5 (widgets used)
+# Try PyQt6 then PyQt5
 try:
     from PyQt6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
@@ -23,15 +23,17 @@ except Exception:
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QLineEdit as QtLineEdit
 
+# Regex helpers
 ASSIGN_RE = re.compile(r'^(?P<prefix>export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<val>.+)$')
 SHOPT_RE = re.compile(r'^\s*shopt\s+(-s|-u)?\s*(?P<opt>\w+)\s*$')
 ALIAS_RE = re.compile(r'^\s*alias\s+(?P<key>[\w\-]+)=(?P<val>.+)$')
 FUNCTION_START_RE = re.compile(r'^\s*(?:(?:function\s+\w+)|(?:\w+\s*\(\s*\)))\s*\{')
 FUNCTION_END_RE = re.compile(r'^\s*\}')
 SETOPT_RE = re.compile(r'^\s*set\s+-o\s+(?P<opt>\w+)\s+(?P<val>\w+)\s*$')
-BINDX_RE = re.compile(r'^\s*bind\s+-x\s+(?P<expr>.+)$')  # capture bind -x "...\:action"
+BINDX_RE = re.compile(r'^\s*bind\s+-x\s+(?P<expr>.+)$')
 
 def list_path_executables(limit=1000):
+    """Return a sorted list of executable names found in $PATH (unique)."""
     exes = []
     paths = os.environ.get("PATH", "").split(os.pathsep)
     seen = set()
@@ -52,25 +54,60 @@ def list_path_executables(limit=1000):
     return exes[:limit]
 
 class EditorWidget(QWidget):
+    """
+    EditorWidget(core_config=None)
+
+    core_config: optional object from core. Use it only if its path obviously refers to a bashrc/shell file.
+    Otherwise prefer ~/.bashrc.
+    """
     def __init__(self, core_config=None):
         super().__init__()
+
         self.core_config = core_config
-        self.bashrc_path = Path.home() / ".bashrc"
+
+        # choose file to edit: prefer ~/.bashrc unless core_config points to a shell file
+        default_bashrc = Path.home() / ".bashrc"
+        self.bashrc_path = default_bashrc
         self.using_core = False
-        self.lines = []
-        self.entries = {}
-        self.startup_cmds = []     # list[(line_idx or None, text)]
-        self.keybinds = []         # list[(line_idx or None, expr_text)]
+
+        try:
+            core_path = None
+            if self.core_config is not None and hasattr(self.core_config, "path"):
+                core_path = Path(getattr(self.core_config, "path"))
+            if core_path:
+                name = core_path.name.lower()
+                full = str(core_path).lower()
+                if ("bashrc" in name) or (name.endswith(".sh")) or ("bash" in full and "i3" not in full):
+                    self.bashrc_path = core_path
+                    self.using_core = True
+                else:
+                    self.bashrc_path = default_bashrc
+                    self.using_core = False
+        except Exception:
+            self.bashrc_path = default_bashrc
+            self.using_core = False
+
+        # internal state
+        self.lines = []          # list of lines with newline endings
+        self.entries = {}        # parsed assignments / shopt / alias entries
+        self.startup_cmds = []   # list of (line_idx or None, text)
+        self.keybinds = []       # list of (line_idx or None, expr_text)
+
+        # header label so user sees which file is being edited
+        self.header_label = QLabel()
         self._load_source()
         self._build_ui()
 
-    # ---------- load & parse ----------
+    # -----------------------------
+    # Loading & parsing
+    # -----------------------------
     def _load_source(self):
-        # prefer core_config.lines if given
-        if self.core_config is not None and hasattr(self.core_config, "lines"):
+        # if using_core and core_config has .lines, prefer that (but normalize newlines)
+        if self.using_core and self.core_config is not None and hasattr(self.core_config, "lines"):
             try:
-                self.using_core = True
-                self.lines = list(self.core_config.lines)
+                raw_lines = list(self.core_config.lines)
+                # core's lines often don't have trailing newlines (splitlines). normalize.
+                self.lines = [ln if ln.endswith("\n") else ln + "\n" for ln in raw_lines]
             except Exception:
                 self.using_core = False
 
@@ -80,6 +117,7 @@ class EditorWidget(QWidget):
             else:
                 self.lines = []
 
+        # parse file into entries/startup/keybind lists
         self._parse_lines()
 
     def _parse_lines(self):
@@ -87,6 +125,7 @@ class EditorWidget(QWidget):
         self.startup_cmds = []
         self.keybinds = []
         in_function = False
+
         for idx, raw in enumerate(self.lines):
             s = raw.strip()
             if FUNCTION_START_RE.match(s):
@@ -98,14 +137,12 @@ class EditorWidget(QWidget):
             if not s or s.startswith("#"):
                 continue
 
-            # bind -x handling
             mb = BINDX_RE.match(s)
             if mb:
                 expr = mb.group("expr").strip()
                 self.keybinds.append((idx, expr))
                 continue
 
-            # assignment
             m = ASSIGN_RE.match(s)
             if m:
                 key = m.group("key")
@@ -114,14 +151,12 @@ class EditorWidget(QWidget):
                 self.entries[key] = {"line_idx": idx, "kind": "assign", "prefix": prefix, "val": val}
                 continue
 
-            # shopt
             m2 = SHOPT_RE.match(s)
             if m2:
                 opt = m2.group("opt")
                 self.entries[f"shopt:{opt}"] = {"line_idx": idx, "kind": "shopt", "text": s}
                 continue
 
-            # set -o
             m3 = SETOPT_RE.match(s)
             if m3:
                 opt = m3.group("opt")
@@ -129,7 +164,6 @@ class EditorWidget(QWidget):
                 self.entries[f"setopt:{opt}"] = {"line_idx": idx, "kind": "setopt", "val": val}
                 continue
 
-            # alias
             ma = ALIAS_RE.match(s)
             if ma:
                 key = ma.group("key")
@@ -137,21 +171,32 @@ class EditorWidget(QWidget):
                 self.entries[f"alias:{key}"] = {"line_idx": idx, "kind": "alias", "val": val}
                 continue
 
-            # fallback: treat as simple startup command if safe-ish
+            # fallback: simple startup command candidate
             if ("=" not in s) and (s.find(";") == -1) and (not s.startswith("if ")) and (not s.startswith("case ")) and (not s.startswith("for ")) and (not s.startswith("while ")) and (not s.startswith("function ")):
                 self.startup_cmds.append((idx, raw.rstrip("\n")))
                 continue
 
     def _backup(self):
-        target = (Path(self.core_config.path) if (self.using_core and hasattr(self.core_config, "path")) else self.bashrc_path)
+        target = None
+        if self.using_core and hasattr(self.core_config, "path"):
+            target = Path(self.core_config.path)
+        if target is None:
+            target = self.bashrc_path
         if target.exists():
             bak = target.parent / (target.name + ".bak")
             shutil.copy(target, bak)
 
-    # ---------- UI ----------
+    # -----------------------------
+    # UI building
+    # -----------------------------
     def _build_ui(self):
         root = QVBoxLayout()
         self.setLayout(root)
+
+        # header
+        self.header_label.setText(f"Editing: {self.bashrc_path}")
+        root.addWidget(self.header_label)
+
         tabs = QTabWidget()
         root.addWidget(tabs)
 
@@ -160,7 +205,7 @@ class EditorWidget(QWidget):
         tabs.addTab(self._build_misc_tab(), "Misc")
         tabs.addTab(self._build_keybindings_tab(), "Keybindings")
 
-        # Save / refresh row
+        # Save / Refresh row
         row = QHBoxLayout()
         save_btn = QPushButton("Save changes")
         save_btn.clicked.connect(self._on_save)
@@ -180,18 +225,23 @@ class EditorWidget(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, idx)
             self.startup_list.addItem(item)
         layout.addWidget(self.startup_list)
+
         btn_row = QHBoxLayout()
         add_btn = QPushButton("Add command"); add_btn.clicked.connect(self._on_add_startup)
-        rm_btn = QPushButton("Remove selected"); rm_btn.clicked.connect(self._on_remove_startup)
         edit_btn = QPushButton("Edit selected"); edit_btn.clicked.connect(self._on_edit_startup)
+        rm_btn = QPushButton("Remove selected"); rm_btn.clicked.connect(self._on_remove_startup)
         btn_row.addWidget(add_btn); btn_row.addWidget(edit_btn); btn_row.addWidget(rm_btn)
         layout.addLayout(btn_row)
-        layout.addWidget(QLabel("Quick pick installed executable:"))
+
+        layout.addWidget(QLabel("Quick pick installed executable (searchable):"))
         self.exec_combo = QComboBox(); self.exec_combo.setEditable(True)
-        for exe in list_path_executables(): self.exec_combo.addItem(exe)
+        for exe in list_path_executables():
+            self.exec_combo.addItem(exe)
         layout.addWidget(self.exec_combo)
-        run_row = QHBoxLayout(); run_btn = QPushButton("Add selected executable to startup"); run_btn.clicked.connect(self._on_add_exec)
-        run_row.addWidget(run_btn); layout.addLayout(run_row)
+        run_row = QHBoxLayout()
+        run_btn = QPushButton("Add selected executable to startup"); run_btn.clicked.connect(self._on_add_exec)
+        run_row.addWidget(run_btn)
+        layout.addLayout(run_row)
         return w
 
     def _on_add_startup(self):
@@ -222,7 +272,9 @@ class EditorWidget(QWidget):
         cur = it.text()
         txt, ok = self._prompt_text("Edit startup command", "Command:", cur)
         if ok:
-            it.setText(txt); idx, _ = self.startup_cmds[row]; self.startup_cmds[row] = (idx, txt)
+            it.setText(txt)
+            idx, _ = self.startup_cmds[row]
+            self.startup_cmds[row] = (idx, txt)
 
     # ---------- Appearance ----------
     def _build_appearance_tab(self):
@@ -231,29 +283,49 @@ class EditorWidget(QWidget):
         if isinstance(current_ps1, str) and (current_ps1.startswith('"') or current_ps1.startswith("'")):
             current_ps1 = current_ps1[1:-1]
         self.ps1_input = QLineEdit(current_ps1)
-        layout.addWidget(QLabel("PS1 prompt (raw string, escapes allowed):")); layout.addWidget(self.ps1_input)
-        cp_val = self.entries.get("color_prompt", {}).get("val", "no"); cp_enabled = str(cp_val).lower() in ("yes","true","1")
-        self.color_prompt_cb = QCheckBox("Enable color prompt (set color_prompt=yes)"); self.color_prompt_cb.setChecked(cp_enabled); layout.addWidget(self.color_prompt_cb)
-        force_val = self.entries.get("force_color_prompt", {}).get("val", "no"); force_enabled = str(force_val).lower() in ("yes","true","1")
-        self.force_cp_cb = QCheckBox("Force color prompt (set force_color_prompt=yes)"); self.force_cp_cb.setChecked(force_enabled); layout.addWidget(self.force_cp_cb)
+        layout.addWidget(QLabel("PS1 prompt (raw string, escapes allowed):"))
+        layout.addWidget(self.ps1_input)
+
+        cp_val = self.entries.get("color_prompt", {}).get("val", "no")
+        cp_enabled = str(cp_val).lower() in ("yes", "true", "1")
+        self.color_prompt_cb = QCheckBox("Enable color prompt (set color_prompt=yes)")
+        self.color_prompt_cb.setChecked(cp_enabled)
+        layout.addWidget(self.color_prompt_cb)
+
+        force_val = self.entries.get("force_color_prompt", {}).get("val", "no")
+        force_enabled = str(force_val).lower() in ("yes", "true", "1")
+        self.force_cp_cb = QCheckBox("Force color prompt (set force_color_prompt=yes)")
+        self.force_cp_cb.setChecked(force_enabled)
+        layout.addWidget(self.force_cp_cb)
+
         return w
 
     # ---------- Misc ----------
     def _build_misc_tab(self):
         w = QWidget(); layout = QVBoxLayout(); w.setLayout(layout)
-        hist_v = self.entries.get("HISTSIZE", {}).get("val", "1000"); 
+        hist_v = self.entries.get("HISTSIZE", {}).get("val", "1000")
         try: hist_i = int(str(hist_v).strip())
         except: hist_i = 1000
-        layout.addWidget(QLabel("HISTSIZE")); self.hist_spin = QSpinBox(); self.hist_spin.setRange(0,10_000_000); self.hist_spin.setValue(hist_i); layout.addWidget(self.hist_spin)
-        hfs = self.entries.get("HISTFILESIZE", {}).get("val", "2000"); 
+        layout.addWidget(QLabel("HISTSIZE"))
+        self.hist_spin = QSpinBox(); self.hist_spin.setRange(0, 10_000_000); self.hist_spin.setValue(hist_i); layout.addWidget(self.hist_spin)
+
+        hfs = self.entries.get("HISTFILESIZE", {}).get("val", "2000")
         try: hfs_i = int(str(hfs).strip())
         except: hfs_i = 2000
-        layout.addWidget(QLabel("HISTFILESIZE")); self.histfile_spin = QSpinBox(); self.histfile_spin.setRange(0,10_000_000); self.histfile_spin.setValue(hfs_i); layout.addWidget(self.histfile_spin)
+        layout.addWidget(QLabel("HISTFILESIZE"))
+        self.histfile_spin = QSpinBox(); self.histfile_spin.setRange(0, 10_000_000); self.histfile_spin.setValue(hfs_i); layout.addWidget(self.histfile_spin)
+
         histappend_present = any(k.startswith("shopt:histappend") for k in self.entries.keys())
         self.histappend_cb = QCheckBox("Enable shopt histappend"); self.histappend_cb.setChecked(histappend_present); layout.addWidget(self.histappend_cb)
+
         checkwinsize_present = any(k.startswith("shopt:checkwinsize") for k in self.entries.keys())
         self.checkwinsize_cb = QCheckBox("Enable shopt checkwinsize"); self.checkwinsize_cb.setChecked(checkwinsize_present); layout.addWidget(self.checkwinsize_cb)
-        alias_ls = self.entries.get("alias:ls"); self.ls_alias_cb = QCheckBox("Enable ls color alias (alias ls='ls --color=auto')"); self.ls_alias_cb.setChecked(alias_ls is not None); layout.addWidget(self.ls_alias_cb)
+
+        alias_ls = self.entries.get("alias:ls")
+        self.ls_alias_cb = QCheckBox("Enable ls color alias (alias ls='ls --color=auto')")
+        self.ls_alias_cb.setChecked(alias_ls is not None)
+        layout.addWidget(self.ls_alias_cb)
+
         return w
 
     # ---------- Keybindings ----------
@@ -272,7 +344,7 @@ class EditorWidget(QWidget):
         rm_btn = QPushButton("Remove selected"); rm_btn.clicked.connect(self._on_remove_bind)
         btn_row.addWidget(add_btn); btn_row.addWidget(edit_btn); btn_row.addWidget(rm_btn)
         layout.addLayout(btn_row)
-        layout.addWidget(QLabel("Example format: \"\\C-@\":toggle_assistant  (quotes required for special chars)"))
+        layout.addWidget(QLabel('Example entry: "\\C-@":toggle_assistant  (include quotes if using special chars)'))
         return w
 
     def _on_add_bind(self):
@@ -295,47 +367,47 @@ class EditorWidget(QWidget):
         if not it: return
         row = self.bind_list.row(it); self.bind_list.takeItem(row); del self.keybinds[row]
 
-    # ---------- helper dialog (robust across PyQt5/6) ----------
+    # ---------- dialog helper ----------
     def _prompt_text(self, title, label, default=""):
         """
-        Uses QInputDialog.getText in a signature-compatible way.
-        Returns (text, ok_bool)
+        Use QInputDialog.getText in a signature-compatible way across PyQt5/6.
         """
-        # QInputDialog.getText signatures vary; pass positional arguments:
         try:
-            # positional: parent, title, label, echoMode, text
             txt, ok = QInputDialog.getText(self, title, label, QtLineEdit.EchoMode.Normal, default)
         except TypeError:
-            # fallback (PyQt5 sometimes expects different enum location)
             try:
                 txt, ok = QInputDialog.getText(self, title, label, QtLineEdit.Normal, default)
             except Exception:
-                # last resort: call with minimal args (may show with default empty)
                 txt, ok = QInputDialog.getText(self, title, label)
         return txt, ok
 
     # ---------- refresh / clear ----------
     def _on_refresh(self):
-        self._load_source(); self._clear_layout(self.layout()); self._build_ui()
+        self._load_source()
+        self._clear_layout(self.layout())
+        self._build_ui()
 
     def _clear_layout(self, layout):
         if layout is None: return
         while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
-            if w is not None: w.deleteLater()
+            if w is not None:
+                w.deleteLater()
             else:
                 sub = item.layout()
-                if sub is not None: self._clear_layout(sub)
+                if sub is not None:
+                    self._clear_layout(sub)
 
     # ---------- save ----------
     def _on_save(self):
-        try: self._backup()
-        except Exception: pass
+        try:
+            self._backup()
+        except Exception:
+            pass
 
         lines = list(self.lines)
 
-        # helper to replace or append ASSIGN lines
         def replace_or_append_assign(key, value, prefix=""):
             ent = self.entries.get(key)
             line = f"{prefix}{key}={value}\n"
@@ -344,7 +416,7 @@ class EditorWidget(QWidget):
             else:
                 lines.append(line)
 
-        # save HIST*
+        # HISTSIZE / HISTFILESIZE
         replace_or_append_assign("HISTSIZE", str(self.hist_spin.value()))
         replace_or_append_assign("HISTFILESIZE", str(self.histfile_spin.value()))
 
@@ -379,7 +451,6 @@ class EditorWidget(QWidget):
         else:
             ent = self.entries.get("alias:ls")
             if ent and ent.get("line_idx") is not None:
-                # comment out
                 idx = ent["line_idx"]
                 if not lines[idx].lstrip().startswith("#"):
                     lines[idx] = "# " + lines[idx]
@@ -394,7 +465,7 @@ class EditorWidget(QWidget):
                 filtered.append(cmd.rstrip() + "\n")
         final_lines = filtered
 
-        # Keybindings: similar strategy
+        # Keybindings: remove detected bind -x lines and append new ones
         removed_bind_idxs = [i for i, _ in self.keybinds if i is not None]
         filtered2 = [ln for j, ln in enumerate(final_lines) if j not in removed_bind_idxs]
         new_binds = [self.bind_list.item(i).text().rstrip() for i in range(self.bind_list.count())]
@@ -404,11 +475,12 @@ class EditorWidget(QWidget):
                 filtered2.append("bind -x " + b.rstrip() + "\n")
         final_lines = filtered2
 
-        # Write via core config if possible, else write file
+        # Write via core_config if available and using_core, else write file
         if self.using_core and hasattr(self.core_config, "path"):
             try:
                 with open(self.core_config.path, "w", encoding="utf-8") as f:
                     f.writelines(final_lines)
+                # try to call core load/save hooks
                 if hasattr(self.core_config, "load"):
                     try: self.core_config.load()
                     except: pass
@@ -425,5 +497,5 @@ class EditorWidget(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Save failed", f"Failed to write ~/.bashrc: {e}")
 
-        # reload
+        # reload memory
         self._load_source()
