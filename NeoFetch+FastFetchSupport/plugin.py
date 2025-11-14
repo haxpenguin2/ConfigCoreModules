@@ -1,7 +1,7 @@
-# plugin.py — Fastfetch (JSONC) + Neofetch editor plugin (JSONC-aware for fastfetch)
-# - Parses fastfetch's JSONC config.jsonc, exposes Modules / Logo / Display editing, and Raw editing.
-# - Falls back to SimpleKeyConfig for older key=value-style configs (neofetch).
-# - Backups made automatically. Comments removed on save (JSON pretty-printed).
+# plugin.py — Fastfetch (JSONC) + Neofetch editor (drop-in)
+# - Parses fastfetch's JSONC config.jsonc, edits ascii_path/ascii_colors/modules/logo/display, and saves (backup).
+# - Falls back to a conservative line-based editor for neofetch.
+# - Provides a GUI with tabs and a Browse button to pick an ASCII art file.
 
 import os
 import re
@@ -10,22 +10,18 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-# --- Paths (prefer config.jsonc for fastfetch) ---
+# Prefer user config.jsonc for fastfetch
 FASTFETCH_PATHS = [
     os.path.expanduser("~/.config/fastfetch/config.jsonc"),
     os.path.expanduser("~/.config/fastfetch/config"),
     os.path.expanduser("~/.fastfetch/config.jsonc"),
-    os.path.expanduser("~/.fastfetch/config"),
     "/etc/fastfetch/config.jsonc",
     "/etc/fastfetch/config",
 ]
 NEOFETCH_PATHS = [
     os.path.expanduser("~/.config/neofetch/config.conf"),
-    os.path.expanduser("~/.config/neofetch/config"),
     os.path.expanduser("~/.neofetch/config.conf"),
-    os.path.expanduser("~/.neofetch/config"),
     "/etc/neofetch/config.conf",
-    "/etc/neofetch/config",
 ]
 
 def first_existing(paths):
@@ -34,48 +30,44 @@ def first_existing(paths):
             return p
     return paths[0]
 
-# ----------------------------
-# JSONC handling for fastfetch
-# ----------------------------
+# -----------------------
+# JSONC utilities
+# -----------------------
 def strip_jsonc_comments(text: str) -> str:
     """
-    Remove /* ... */ and //... comments from JSONC text.
-    Conservative: removes multi-line and single-line comments.
+    Remove /* ... */ and // ... comments from JSONC text.
+    This is conservative but practical for most fastfetch configs.
     """
     # remove block comments first
-    text_no_block = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    # remove // comments (but not inside strings) -> use regex ignoring quotes roughly
-    def _remove_line_comments(s):
-        out_lines = []
-        for line in s.splitlines():
-            # naive approach: skip '//' that are inside quotes by scanning
-            i = 0
-            in_s = False
-            in_d = False
-            while i < len(line):
-                ch = line[i]
-                if ch == "'" and not in_d:
-                    in_s = not in_s
-                elif ch == '"' and not in_s:
-                    in_d = not in_d
-                elif ch == '/' and i+1 < len(line) and line[i+1] == '/' and not in_s and not in_d:
-                    # cut the line here
-                    line = line[:i]
-                    break
-                i += 1
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # remove // comments that are not inside quotes (best-effort)
+    out_lines = []
+    for line in text.splitlines():
+        i = 0
+        in_s = False
+        in_d = False
+        cut_at = None
+        while i < len(line) - 1:
+            ch = line[i]
+            nxt = line[i+1]
+            if ch == "'" and not in_d:
+                in_s = not in_s
+            elif ch == '"' and not in_s:
+                in_d = not in_d
+            elif ch == '/' and nxt == '/' and not in_s and not in_d:
+                cut_at = i
+                break
+            i += 1
+        if cut_at is not None:
+            out_lines.append(line[:cut_at])
+        else:
             out_lines.append(line)
-        return "\n".join(out_lines)
-    return _remove_line_comments(text_no_block)
+    return "\n".join(out_lines)
 
+# -----------------------
+# Fastfetch JSON model
+# -----------------------
 class FastfetchJSONModel:
-    """
-    Load, edit, and save a fastfetch JSONC config.
-    - load(): reads raw text and builds `data` dict via json.loads after stripping comments
-    - get(path, default=None): dot-separated path (e.g. 'logo.source' or 'display.color.title')
-    - set(path, value): sets nested key, creating dicts as needed
-    - modules helpers: list_modules(), set_module(idx, value), append_module(value), remove_module(idx)
-    - save(): writes pretty JSON (comments lost) and makes backup
-    """
     def __init__(self, path):
         self.path = Path(path)
         self.raw_text = ""
@@ -87,9 +79,9 @@ class FastfetchJSONModel:
             self.raw_text = self.path.read_text(encoding="utf-8", errors="surrogateescape")
             try:
                 clean = strip_jsonc_comments(self.raw_text)
-                self.data = json.loads(clean)
+                self.data = json.loads(clean) if clean.strip() else {}
             except Exception:
-                # if parsing fails, keep empty dict but preserve raw_text
+                # parse error -> keep empty dict but preserve raw_text
                 self.data = {}
         else:
             self.raw_text = ""
@@ -104,17 +96,8 @@ class FastfetchJSONModel:
             except Exception:
                 pass
 
-    def _resolve_path(self, path: str):
-        """Return (parent_dict, last_key) for dot-path, creating intermediate dicts if needed"""
-        keys = path.split(".")
-        cur = self.data
-        for k in keys[:-1]:
-            if not isinstance(cur.get(k), dict):
-                cur[k] = {}
-            cur = cur[k]
-        return cur, keys[-1]
-
-    def get(self, path: str, default=None):
+    def get(self, path, default=None):
+        # dot-path like logo.source
         cur = self.data
         for p in path.split("."):
             if not isinstance(cur, dict) or p not in cur:
@@ -122,57 +105,57 @@ class FastfetchJSONModel:
             cur = cur[p]
         return cur
 
-    def set(self, path: str, value):
-        parent, last = self._resolve_path(path)
-        parent[last] = value
+    def set(self, path, value):
+        cur = self.data
+        parts = path.split(".")
+        for p in parts[:-1]:
+            if not isinstance(cur.get(p), dict):
+                cur[p] = {}
+            cur = cur[p]
+        cur[parts[-1]] = value
         return True
 
-    # --- Modules helpers (fastfetch uses a 'modules' array) ---
+    # modules helpers
     def list_modules(self):
         m = self.data.get("modules", [])
-        if not isinstance(m, list):
-            return []
-        return m
+        return m if isinstance(m, list) else []
 
-    def set_module(self, idx: int, value):
-        m = self.data.get("modules", [])
-        if 0 <= idx < len(m):
-            m[idx] = value
-            self.data["modules"] = m
-            return True
-        return False
-
-    def append_module(self, value):
-        m = self.data.get("modules")
-        if not isinstance(m, list):
+    def append_module(self, v):
+        if "modules" not in self.data or not isinstance(self.data["modules"], list):
             self.data["modules"] = []
-        self.data["modules"].append(value)
+        self.data["modules"].append(v)
         return True
 
-    def remove_module(self, idx: int):
-        m = self.data.get("modules", [])
-        if 0 <= idx < len(m):
-            m.pop(idx)
-            self.data["modules"] = m
+    def set_module(self, idx, v):
+        if "modules" not in self.data or not isinstance(self.data["modules"], list):
+            return False
+        if 0 <= idx < len(self.data["modules"]):
+            self.data["modules"][idx] = v
             return True
         return False
 
-    def save(self, backup: bool = True):
+    def remove_module(self, idx):
+        if "modules" not in self.data or not isinstance(self.data["modules"], list):
+            return False
+        if 0 <= idx < len(self.data["modules"]):
+            self.data["modules"].pop(idx)
+            return True
+        return False
+
+    def save(self, backup=True):
         if backup:
             self._backup()
-        # write pretty JSON; users editing comments should use Raw tab if they want to keep manual comments
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("w", encoding="utf-8", errors="surrogateescape") as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
-                f.write("\n")
-        except Exception:
-            raise
+        # write pretty JSON (comments will be lost)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", encoding="utf-8", errors="surrogateescape") as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        # reload raw_text
+        self.load()
 
-# ---------------------------
-# (Existing) SimpleKeyConfig for neofetch (unchanged)
-# ---------------------------
-# small/trimmed SimpleKeyConfig from earlier plugin (key=value style)
+# -----------------------
+# Simple key=value config (neofetch style)
+# -----------------------
 class SimpleKeyConfig:
     KEY_RE = re.compile(r'^(\s*{key}\s*)(?:=\s*(?P<val>[^#\n]*?))?(\s*(?P<comment>[#;].*)?)$', re.IGNORECASE)
     INFO_RE = re.compile(r'^\s*info\s+(?P<label>"[^"]*"|\'[^\']*\'|\S+)\s+(?P<value>\S+)(?P<rest>.*)$', re.IGNORECASE)
@@ -228,6 +211,7 @@ class SimpleKeyConfig:
         comment = m.groupdict().get("comment") or ""
         if comment and not comment.endswith("\n"):
             comment = comment + "\n"
+        # quote if contains spaces
         val_text = value
         if " " in val_text and not (val_text.startswith("(") and val_text.endswith(")")) and not ((val_text.startswith('"') and val_text.endswith('"')) or (val_text.startswith("'") and val_text.endswith("'"))):
             val_text = f'"{val_text}"'
@@ -245,7 +229,6 @@ class SimpleKeyConfig:
         self.lines.append(f"{key}={val_text}\n")
         return True
 
-    # Info lines for neofetch style (unchanged)
     def list_info(self):
         items = []
         for i, ln in enumerate(self.lines):
@@ -299,22 +282,22 @@ class SimpleKeyConfig:
         with self.path.open("w", encoding="utf-8", errors="surrogateescape") as f:
             f.writelines(self.lines)
 
-# ---------------------------
-# GUI (lazy-loaded, PyQt6 preferred)
-# ---------------------------
+# -----------------------
+# GUI (lazy)
+# -----------------------
 def create_editor(core_config=None):
     try:
         from PyQt6.QtWidgets import (
             QWidget, QVBoxLayout, QLabel, QPushButton, QTabWidget, QLineEdit,
             QHBoxLayout, QMessageBox, QListWidget, QListWidgetItem, QTextEdit,
-            QFormLayout, QInputDialog, QGroupBox
+            QFormLayout, QInputDialog, QFileDialog, QCheckBox, QGroupBox
         )
         from PyQt6.QtCore import Qt
     except Exception:
         from PyQt5.QtWidgets import (
             QWidget, QVBoxLayout, QLabel, QPushButton, QTabWidget, QLineEdit,
             QHBoxLayout, QMessageBox, QListWidget, QListWidgetItem, QTextEdit,
-            QFormLayout, QInputDialog, QGroupBox
+            QFormLayout, QInputDialog, QFileDialog, QCheckBox, QGroupBox
         )
         from PyQt5.QtCore import Qt
 
@@ -323,158 +306,177 @@ def create_editor(core_config=None):
             super().__init__()
             self.fast_path = first_existing(FASTFETCH_PATHS)
             self.neo_path = first_existing(NEOFETCH_PATHS)
-            self.fast_is_jsonc = str(self.fast_path).lower().endswith(".jsonc") or os.path.isfile(self.fast_path)
-            # pick default mode
+            # choose which mode based on which file exists (user config preferred)
             if os.path.isfile(self.fast_path):
                 self.mode = "fastfetch"
             elif os.path.isfile(self.neo_path):
                 self.mode = "neofetch"
             else:
                 self.mode = "fastfetch"
-            # load model(s)
+            # load models
             self._load_models()
             self._build_ui()
 
         def _load_models(self):
-            # fastfetch: use JSON model if file endswith .jsonc or exists as jsonc
-            if str(self.fast_path).lower().endswith(".jsonc") or (os.path.isfile(self.fast_path) and str(self.fast_path).lower().endswith(".jsonc")):
+            if str(self.fast_path).lower().endswith(".jsonc") or os.path.isfile(self.fast_path) and str(self.fast_path).lower().endswith(".jsonc"):
                 self.fast_model = FastfetchJSONModel(self.fast_path)
             else:
-                self.fast_model = SimpleKeyConfig(self.fast_path)
+                # fallback: some fastfetch setups may not use jsonc; still try JSON model when possible
+                try:
+                    self.fast_model = FastfetchJSONModel(self.fast_path)
+                except Exception:
+                    self.fast_model = SimpleKeyConfig(self.fast_path)
             self.neo_model = SimpleKeyConfig(self.neo_path)
 
         def _build_ui(self):
             layout = QVBoxLayout()
             self.setLayout(layout)
-            hdr = QHBoxLayout()
-            hdr.addWidget(QLabel("Mode:"))
-            self.mode_box = QLineEdit(self.mode)  # simple indicator — core supplies mode select in larger UI
-            self.mode_box.setReadOnly(True)
-            hdr.addWidget(self.mode_box)
-            hdr.addStretch()
+
+            top = QHBoxLayout()
+            top.addWidget(QLabel("Mode:"))
+            self.mode_sel = QLineEdit(self.mode)
+            self.mode_sel.setReadOnly(True)
+            top.addWidget(self.mode_sel)
+            top.addStretch()
             save_btn = QPushButton("Save (safe)")
             save_btn.clicked.connect(self._on_save)
-            hdr.addWidget(save_btn)
-            layout.addLayout(hdr)
+            top.addWidget(save_btn)
+            layout.addLayout(top)
 
             self.tabs = QTabWidget()
             layout.addWidget(self.tabs)
 
-            # Modules tab (works for fastfetch JSON modules OR for neofetch's info lines)
+            # Modules / Info tab
             self.mods_tab = QWidget()
-            mod_layout = QVBoxLayout()
-            self.mods_tab.setLayout(mod_layout)
-            mod_layout.addWidget(QLabel("Modules / Info items (order matters)"))
+            ml = QVBoxLayout(); self.mods_tab.setLayout(ml)
+            ml.addWidget(QLabel("Modules / Info items (order matters)"))
             self.mods_list = QListWidget()
-            mod_layout.addWidget(self.mods_list)
-            btn_row = QHBoxLayout()
-            add_btn = QPushButton("Add")
-            edit_btn = QPushButton("Edit")
-            rm_btn = QPushButton("Remove")
-            refresh_btn = QPushButton("Refresh")
-            add_btn.clicked.connect(self._add_item)
-            edit_btn.clicked.connect(self._edit_item)
-            rm_btn.clicked.connect(self._remove_item)
-            refresh_btn.clicked.connect(self._refresh_items)
-            btn_row.addWidget(add_btn); btn_row.addWidget(edit_btn); btn_row.addWidget(rm_btn); btn_row.addWidget(refresh_btn)
-            mod_layout.addLayout(btn_row)
+            ml.addWidget(self.mods_list)
+            btns = QHBoxLayout()
+            add_btn = QPushButton("Add"); add_btn.clicked.connect(self._add_item)
+            edit_btn = QPushButton("Edit"); edit_btn.clicked.connect(self._edit_item)
+            rm_btn = QPushButton("Remove"); rm_btn.clicked.connect(self._remove_item)
+            ref_btn = QPushButton("Refresh"); ref_btn.clicked.connect(self._refresh_items)
+            btns.addWidget(add_btn); btns.addWidget(edit_btn); btns.addWidget(rm_btn); btns.addWidget(ref_btn)
+            ml.addLayout(btns)
             self.tabs.addTab(self.mods_tab, "Modules / Info")
 
-            # Logo tab (fastfetch JSON)
-            self.logo_tab = QWidget()
-            logo_f = QFormLayout()
-            self.logo_tab.setLayout(logo_f)
-            self.logo_type = QLineEdit()
-            self.logo_source = QLineEdit()
-            logo_f.addRow(QLabel("logo.type"), self.logo_type)
-            logo_f.addRow(QLabel("logo.source"), self.logo_source)
-            self.tabs.addTab(self.logo_tab, "Logo")
+            # ASCII / Image tab
+            self.ascii_tab = QWidget()
+            af = QFormLayout(); self.ascii_tab.setLayout(af)
+            self.backend_le = QLineEdit(); self.backend_le.setPlaceholderText("ascii / image / off")
+            self.ascii_distro_le = QLineEdit(); self.ascii_distro_le.setPlaceholderText("Distro for ascii art (e.g. Arch)")
+            # ascii path with browse
+            row = QHBoxLayout()
+            self.ascii_file_le = QLineEdit(); self.ascii_file_le.setPlaceholderText("/path/to/ascii.txt")
+            browse = QPushButton("Browse…")
+            browse.clicked.connect(self._browse_ascii_file)
+            row.addWidget(self.ascii_file_le); row.addWidget(browse)
+            self.ascii_bold_cb = QCheckBox("ASCII bold")
+            af.addRow(QLabel("Mode"), self.backend_le)
+            af.addRow(QLabel("ASCII distro"), self.ascii_distro_le)
+            af.addRow(QLabel("ASCII file"), row)
+            af.addRow(self.ascii_bold_cb)
+            self.tabs.addTab(self.ascii_tab, "ASCII / Image")
 
-            # Display tab (basic color title)
-            self.display_tab = QWidget()
-            display_f = QFormLayout()
-            self.display_tab.setLayout(display_f)
-            self.display_color_title = QLineEdit()
-            display_f.addRow(QLabel("display.color.title"), self.display_color_title)
-            self.tabs.addTab(self.display_tab, "Display")
+            # Logo & Display tab (logo.type/logo.source, basic display colors)
+            self.logo_tab = QWidget()
+            lf = QFormLayout(); self.logo_tab.setLayout(lf)
+            self.logo_type_le = QLineEdit(); self.logo_source_le = QLineEdit()
+            self.display_title_color_le = QLineEdit()
+            lf.addRow(QLabel("logo.type"), self.logo_type_le)
+            lf.addRow(QLabel("logo.source"), self.logo_source_le)
+            lf.addRow(QLabel("display.color.title"), self.display_title_color_le)
+            self.tabs.addTab(self.logo_tab, "Logo / Display")
+
+            # Colors tab (ascii_colors)
+            self.colors_tab = QWidget()
+            cf = QFormLayout(); self.colors_tab.setLayout(cf)
+            self.ascii_colors_le = QLineEdit(); self.ascii_colors_le.setPlaceholderText("e.g. 4 6 1 3 5 or red blue")
+            cf.addRow(QLabel("ASCII colors (space or comma separated)"), self.ascii_colors_le)
+            self.tabs.addTab(self.colors_tab, "Colors")
 
             # Raw tab
             self.raw_tab = QWidget()
-            rlay = QVBoxLayout()
-            self.raw_tab.setLayout(rlay)
-            rlay.addWidget(QLabel("Raw configuration (advanced). Overwrites file on save. Backup will be created."))
+            rl = QVBoxLayout(); self.raw_tab.setLayout(rl)
+            rl.addWidget(QLabel("Raw config (advanced). Overwrites file on save. Backup created."))
             self.raw_edit = QTextEdit()
-            rlay.addWidget(self.raw_edit)
+            rl.addWidget(self.raw_edit)
             self.tabs.addTab(self.raw_tab, "Raw")
 
-            # Populate UI
+            # populate UI
             self._populate_ui()
 
         def _populate_ui(self):
-            # Choose appropriate model based on mode; although mode UI here is minimal,
-            # core will normally show plugin tab inside plugin list and you can choose config file externally.
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
 
-            # Modules / Info items
+            # Modules / Info
             self._refresh_items()
 
-            # Logo fields (for JSON-only)
+            # ASCII fields
             if isinstance(model, FastfetchJSONModel):
-                logo = model.get("logo", {})
-                if isinstance(logo, dict):
-                    self.logo_type.setText(str(logo.get("type", "")))
-                    self.logo_source.setText(str(logo.get("source", "")))
+                self.backend_le.setText("")  # fastfetch uses modules; mode handled by modules
+                self.ascii_distro_le.setText(model.get("ascii_distro", "") or "")
+                self.ascii_file_le.setText(str(model.get("ascii_path", "") or ""))
+                self.ascii_bold_cb.setChecked(bool(model.get("ascii_bold", False)))
+                # colors
+                colors = model.get("ascii_colors", [])
+                if isinstance(colors, list):
+                    self.ascii_colors_le.setText(" ".join(map(str, colors)))
                 else:
-                    self.logo_type.setText("")
-                    self.logo_source.setText("")
-                # display color title
-                dcol = model.get("display", {}).get("color", {}).get("title", "")
-                self.display_color_title.setText(str(dcol))
-                # raw text: show the original raw_text if available, else pretty JSON
+                    self.ascii_colors_le.setText(str(colors))
+                # logo/display
+                logo = model.get("logo", {}) or {}
+                if isinstance(logo, dict):
+                    self.logo_type_le.setText(str(logo.get("type", "")))
+                    self.logo_source_le.setText(str(logo.get("source", "")))
+                else:
+                    self.logo_type_le.setText("")
+                    self.logo_source_le.setText("")
+                self.display_title_color_le.setText(str(model.get("display", {}).get("color", {}).get("title", "") if model.get("display") else ""))
+                # raw: prefer raw_text so comments visible; if absent show pretty JSON
                 if getattr(model, "raw_text", ""):
                     self.raw_edit.setPlainText(model.raw_text)
                 else:
                     self.raw_edit.setPlainText(json.dumps(model.data, indent=2))
             else:
-                # key=value model: populate some GUI fields (best-effort)
-                self.logo_type.setText("")
-                self.logo_source.setText("")
-                self.display_color_title.setText("")
-                # raw
-                if hasattr(model, "lines"):
-                    self.raw_edit.setPlainText("".join(model.lines))
-                else:
-                    self.raw_edit.setPlainText("")
+                # SimpleKeyConfig: best-effort populate
+                self.backend_le.setText("")
+                self.ascii_distro_le.setText(model.get("ascii_distro", "") or "")
+                self.ascii_file_le.setText(model.get("ascii_path", "") or "")
+                self.ascii_bold_cb.setChecked(str(model.get("ascii_bold", "")).lower() in ("1","on","true","yes"))
+                self.ascii_colors_le.setText(model.get("ascii_colors", "") or "")
+                self.logo_type_le.setText("")
+                self.logo_source_le.setText("")
+                self.display_title_color_le.setText("")
+                self.raw_edit.setPlainText("".join(getattr(model, "lines", [])))
 
-        # ------- Modules / Info helpers -------
+        # ----------------- modules/info helpers -----------------
         def _refresh_items(self):
             self.mods_list.clear()
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
             if isinstance(model, FastfetchJSONModel):
                 items = model.list_modules()
-                for i, item in enumerate(items):
-                    # display as JSON string if object, or plain string
-                    if isinstance(item, dict):
-                        preview = json.dumps(item, separators=(", ", ": "))
+                for i, it in enumerate(items):
+                    if isinstance(it, dict):
+                        preview = json.dumps(it, separators=(", ", ": "))
                     else:
-                        preview = str(item)
-                    it = QListWidgetItem(f"{i}: {preview}")
-                    it.setData(Qt.ItemDataRole.UserRole, i)
-                    self.mods_list.addItem(it)
+                        preview = str(it)
+                    li = QListWidgetItem(f"{i}: {preview}")
+                    li.setData(Qt.ItemDataRole.UserRole, i)
+                    self.mods_list.addItem(li)
             else:
-                # neofetch: use info lines
                 items = model.list_info()
                 for idx, label, value, rest in items:
                     display = f"{label}  →  {value}{(' '+rest) if rest else ''}"
-                    it = QListWidgetItem(display)
-                    it.setData(Qt.ItemDataRole.UserRole, idx)
-                    self.mods_list.addItem(it)
+                    li = QListWidgetItem(display)
+                    li.setData(Qt.ItemDataRole.UserRole, idx)
+                    self.mods_list.addItem(li)
 
         def _add_item(self):
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
             if isinstance(model, FastfetchJSONModel):
-                # Add either a simple module string or a JSON object (ask raw JSON string)
-                txt, ok = QInputDialog.getText(self, "Add module", "Enter module name (string) or JSON object (e.g. {\"type\":\"cpu\",\"temp\":true}):")
+                txt, ok = QInputDialog.getText(self, "Add module", "Module name (string) or JSON object:")
                 if not ok or not txt.strip():
                     return
                 s = txt.strip()
@@ -484,38 +486,34 @@ def create_editor(core_config=None):
                     else:
                         val = s
                     model.append_module(val)
-                    QMessageBox.information(self, "Added", "Module appended.")
                     model.save(backup=False)
                     model.load()
+                    QMessageBox.information(self, "Added", "Module added.")
                     self._populate_ui()
                 except Exception as e:
-                    QMessageBox.critical(self, "Invalid", f"Could not parse module: {e}")
+                    QMessageBox.critical(self, "Error", f"Invalid module: {e}")
             else:
-                # neofetch info line: ask label and token
-                label, ok = QInputDialog.getText(self, "Info Label", "Label (visible):")
+                lbl, ok = QInputDialog.getText(self, "Info label", "Label (visible):")
                 if not ok: return
-                token, ok = QInputDialog.getText(self, "Info Token", "Token (e.g. distro, kernel, uptime):")
+                tok, ok = QInputDialog.getText(self, "Info token", "Token (distro, kernel, uptime, etc):")
                 if not ok: return
-                model.append_info(label.strip(), token.strip())
-                QMessageBox.information(self, "Added", "Info appended.")
+                model.append_info(lbl.strip(), tok.strip())
                 model.save(backup=False)
                 model.load()
+                QMessageBox.information(self, "Added", "Info appended.")
                 self._populate_ui()
 
         def _edit_item(self):
             it = self.mods_list.currentItem()
             if not it:
-                QMessageBox.information(self, "Select", "Select an item to edit.")
+                QMessageBox.information(self, "Select", "Select an item.")
                 return
             idx = it.data(Qt.ItemDataRole.UserRole)
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
             if isinstance(model, FastfetchJSONModel):
                 cur = model.list_modules()[idx]
-                if isinstance(cur, dict):
-                    txt = json.dumps(cur, indent=2)
-                else:
-                    txt = str(cur)
-                new_txt, ok = QInputDialog.getMultiLineText(self, "Edit module", "Edit module (string or JSON):", txt)
+                txt = json.dumps(cur, indent=2) if isinstance(cur, dict) else str(cur)
+                new_txt, ok = QInputDialog.getMultiLineText(self, "Edit module", "Edit (string or JSON):", txt)
                 if not ok: return
                 new_s = new_txt.strip()
                 try:
@@ -529,20 +527,19 @@ def create_editor(core_config=None):
                     QMessageBox.information(self, "Saved", "Module updated.")
                     self._populate_ui()
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Could not set module: {e}")
+                    QMessageBox.critical(self, "Error", f"Could not update: {e}")
             else:
-                # neofetch mapping (line-based)
                 items = model.list_info()
                 for (i, label, value, rest) in items:
                     if i == idx:
                         orig = (i, label, value, rest)
                         break
                 else:
-                    QMessageBox.critical(self, "Error", "Could not find info line.")
+                    QMessageBox.critical(self, "Error", "Could not find line.")
                     return
-                new_label, ok = QInputDialog.getText(self, "Edit label", "Label:", text=orig[1])
+                new_label, ok = QInputDialog.getText(self, "Label", "Label:", text=orig[1])
                 if not ok: return
-                new_value, ok = QInputDialog.getText(self, "Edit token", "Token:", text=orig[2])
+                new_value, ok = QInputDialog.getText(self, "Token", "Token:", text=orig[2])
                 if not ok: return
                 model.set_info_line(idx, new_label.strip(), new_value.strip(), orig[3])
                 model.save(backup=False)
@@ -553,32 +550,56 @@ def create_editor(core_config=None):
         def _remove_item(self):
             it = self.mods_list.currentItem()
             if not it:
-                QMessageBox.information(self, "Select", "Select an item to remove.")
+                QMessageBox.information(self, "Select", "Select an item.")
                 return
             idx = it.data(Qt.ItemDataRole.UserRole)
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
-            confirm = QMessageBox.question(self, "Confirm remove", "Remove selected item?")
-            if confirm != QMessageBox.StandardButton.Yes:
+            conf = QMessageBox.question(self, "Confirm", "Remove selected item?")
+            if conf != QMessageBox.StandardButton.Yes:
                 return
-            if isinstance(model, FastfetchJSONModel):
-                ok = model.remove_module(idx)
-            else:
-                ok = model.remove_line(idx)
+            ok = model.remove_module(idx) if isinstance(model, FastfetchJSONModel) else model.remove_line(idx)
             if not ok:
-                QMessageBox.critical(self, "Remove failed", "Failed to remove item.")
+                QMessageBox.critical(self, "Remove failed", "Failed to remove.")
                 return
             model.save(backup=False)
             model.load()
+            QMessageBox.information(self, "Removed", "Item removed.")
             self._populate_ui()
 
-        # ------- Save button (writes GUI fields back to model) -------
+        # ----------------- ASCII browse -----------------
+        def _browse_ascii_file(self):
+            dlg = QFileDialog(self, "Select ASCII file")
+            dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+            dlg.setNameFilter("Text files (*.txt *.asc *.ansi);;All files (*)")
+            if dlg.exec():
+                files = dlg.selectedFiles()
+                if files:
+                    self.ascii_file_le.setText(files[0])
+
+        # ----------------- Save handler -----------------
         def _on_save(self):
             model = self.fast_model if self.mode == "fastfetch" else self.neo_model
-            # if JSON model, set logo and display color fields
+
+            # If JSON model: write ascii_path, ascii_colors, ascii_bold, logo/display, modules preserved
             if isinstance(model, FastfetchJSONModel):
+                # ascii_path
+                ascii_path = self.ascii_file_le.text().strip()
+                if ascii_path:
+                    model.set("ascii_path", ascii_path)
+                # ascii_bold
+                model.set("ascii_bold", bool(self.ascii_bold_cb.isChecked()))
+                # ascii_colors
+                raw = self.ascii_colors_le.text().strip()
+                if raw:
+                    parts = [p for p in re.split(r'[,\s]+', raw) if p]
+                    model.set("ascii_colors", parts)
+                # ascii_distro (some users store this)
+                ad = self.ascii_distro_le.text().strip()
+                if ad:
+                    model.set("ascii_distro", ad)
                 # logo
-                ltype = self.logo_type.text().strip()
-                lsrc = self.logo_source.text().strip()
+                ltype = self.logo_type_le.text().strip()
+                lsrc = self.logo_source_le.text().strip()
                 if ltype or lsrc:
                     logo = model.get("logo", {}) or {}
                     if ltype:
@@ -586,89 +607,88 @@ def create_editor(core_config=None):
                     if lsrc:
                         logo["source"] = lsrc
                     model.set("logo", logo)
-                # display color title
-                title_col = self.display_color_title.text().strip()
+                # display title color
+                title_col = self.display_title_color_le.text().strip()
                 if title_col:
-                    # ensure nested dicts exist
                     disp = model.get("display", {}) or {}
                     color = disp.get("color", {}) or {}
                     color["title"] = title_col
                     disp["color"] = color
                     model.set("display", disp)
-                # raw tab check: if raw edited, prefer raw save (ask)
-                raw_txt = self.raw_edit.toPlainText().strip()
-                if raw_txt:
-                    # if raw differs from model.raw_text, ask user if they want to overwrite full file
-                    if raw_txt != (model.raw_text or ""):
-                        resp = QMessageBox.question(self, "Raw changed", "Raw text differs from parsed JSON. Overwrite full file with Raw tab content? (Yes = overwrite, No = write structured changes)", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
-                        if resp == QMessageBox.StandardButton.Cancel:
+
+                # Raw tab: if user edited raw and it's different, ask whether to overwrite whole file
+                raw_txt = self.raw_edit.toPlainText()
+                if raw_txt.strip() and raw_txt.strip() != (model.raw_text or "").strip():
+                    resp = QMessageBox.question(self, "Raw changed", "Raw text differs from parsed JSON. Overwrite config file with Raw content? (Yes = overwrite, No = write structured changes)", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+                    if resp == QMessageBox.StandardButton.Cancel:
+                        return
+                    if resp == QMessageBox.StandardButton.Yes:
+                        # write raw directly (backup)
+                        try:
+                            model._backup()
+                            model.path.write_text(raw_txt + ("\n" if not raw_txt.endswith("\n") else ""), encoding="utf-8", errors="surrogateescape")
+                            QMessageBox.information(self, "Saved", f"Wrote raw content to {model.path}")
+                            model.load()
+                            self._populate_ui()
                             return
-                        if resp == QMessageBox.StandardButton.Yes:
-                            # write raw text directly (create backup)
-                            try:
-                                model._backup()
-                                model.path.write_text(raw_txt + ("\n" if not raw_txt.endswith("\n") else ""), encoding="utf-8", errors="surrogateescape")
-                                QMessageBox.information(self, "Saved", f"Saved {model.path} (raw).")
-                                model.load()
-                                self._populate_ui()
-                                return
-                            except PermissionError:
-                                QMessageBox.critical(self, "Permission denied", "Failed to save raw file (permission denied).")
-                                return
-                            except Exception as e:
-                                QMessageBox.critical(self, "Save failed", f"Failed to write raw file: {e}")
-                                return
-                # otherwise persist structured changes
+                        except PermissionError:
+                            QMessageBox.critical(self, "Permission denied", "Failed to write raw file (permission denied).")
+                            return
+                        except Exception as e:
+                            QMessageBox.critical(self, "Save failed", f"Failed to write raw file: {e}")
+                            return
+                # structured save
                 try:
                     model.save(backup=True)
                     QMessageBox.information(self, "Saved", f"Saved {model.path}")
                     model.load()
                     self._populate_ui()
                 except PermissionError:
-                    QMessageBox.critical(self, "Permission denied", "Failed to save: permission denied (system file?).")
+                    QMessageBox.critical(self, "Permission denied", "Failed to save: permission denied (system file?)")
                 except Exception as e:
                     QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
-            else:
-                # SimpleKeyConfig model: follow previous append/replace logic as before
-                missing = []
-                # try to set some common options (best-effort)
-                # title
-                t = self.logo_source.text().strip()
-                if t:
-                    if not model.set_existing("title", t):
-                        missing.append(("title", t))
-                # Attempt to write display.title color if possible
-                if not model.set_existing("color_title", self.display_color_title.text().strip()):
-                    # ignore if not present
-                    pass
-                # If any missing, ask about appending
-                if missing:
-                    msg = "Some keys not found and would be appended:\n"
-                    for k, v in missing: msg += f" - {k} = {v}\n"
-                    msg += "\nAppend them?"
-                    resp = QMessageBox.question(self, "Append missing keys", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
-                    if resp == QMessageBox.StandardButton.Cancel:
-                        try:
-                            model.save(backup=True)
-                            QMessageBox.information(self, "Saved", f"Saved existing changes to {model.path}")
-                        except Exception as e:
-                            QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
-                        return
-                    if resp == QMessageBox.StandardButton.No:
-                        try:
-                            model.save(backup=True)
-                            QMessageBox.information(self, "Saved", f"Saved existing changes to {model.path}")
-                        except Exception as e:
-                            QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
-                        return
-                    for k, v in missing:
-                        model.append_key(k, v)
-                try:
-                    model.save(backup=True)
-                    QMessageBox.information(self, "Saved", f"Saved {model.path}")
-                    model.load()
-                    self._populate_ui()
-                except Exception as e:
-                    QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                return
+
+            # SimpleKeyConfig (neofetch) branch: best-effort writes
+            missing = []
+            if not model.set_existing("ascii_path", self.ascii_file_le.text().strip()):
+                missing.append(("ascii_path", self.ascii_file_le.text().strip()))
+            if not model.set_existing("ascii_colors", self.ascii_colors_le.text().strip()):
+                # try alternate names
+                if not model.set_existing("ascii_colors", self.ascii_colors_le.text().strip()):
+                    missing.append(("ascii_colors", self.ascii_colors_le.text().strip()))
+            # logo & display best-effort
+            if self.logo_type_le.text().strip() and not model.set_existing("logo_type", self.logo_type_le.text().strip()):
+                missing.append(("logo_type", self.logo_type_le.text().strip()))
+            # handle missing -> ask to append
+            if missing:
+                msg = "Some keys were not found and would be appended:\n"
+                for k, v in missing:
+                    msg += f" - {k} = {v}\n"
+                msg += "\nAppend them?"
+                resp = QMessageBox.question(self, "Append missing", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+                if resp == QMessageBox.StandardButton.Cancel:
+                    try:
+                        model.save(backup=True)
+                        QMessageBox.information(self, "Saved", f"Saved existing changes to {model.path}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                    return
+                if resp == QMessageBox.StandardButton.No:
+                    try:
+                        model.save(backup=True)
+                        QMessageBox.information(self, "Saved", f"Saved existing changes to {model.path}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                    return
+                for k, v in missing:
+                    model.append_key(k, v)
+            try:
+                model.save(backup=True)
+                QMessageBox.information(self, "Saved", f"Saved {model.path}")
+                model.load()
+                self._populate_ui()
+            except Exception as e:
+                QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
 
     return FetchEditor(core_config)
