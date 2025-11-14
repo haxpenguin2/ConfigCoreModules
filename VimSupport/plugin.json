@@ -1,0 +1,6 @@
+{
+  "name": "Vim Config Editor",
+  "slug": "vim_plugin",
+  "version": "0.1.0",
+  "min_core_version": "0.2.0"
+}
