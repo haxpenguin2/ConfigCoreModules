@@ -1,35 +1,26 @@
-# plugin.py — Picom editor plugin (lazy-loaded)
-# No Qt objects are created at import time. Use create_editor(core_config).
+# plugin.py — Picom editor plugin (safe, conservative edits only)
+# Lazy-load GUI; only modifies existing keys by default; prompts before appending.
 
-import os
+import os, shutil, re
 from pathlib import Path
-import re
 from datetime import datetime
-import shutil
 
 PICOM_PATH_CANDIDATES = [
     os.path.expanduser("~/.config/picom.conf"),
     os.path.expanduser("~/.config/pipewire/picom.conf"),
-    os.path.expanduser("~/.config/gtk-3.0/picom.conf"),
 ]
 
-def find_picom_path() -> str:
+def find_picom_path():
     for p in PICOM_PATH_CANDIDATES:
         if os.path.isfile(p):
             return p
-    # default to first candidate if none exist (will create on save)
     return PICOM_PATH_CANDIDATES[0]
 
-# ---------- minimal safe Picom config helper that edits only changed lines ----------
 class PicomConfig:
     """
-    Lightweight editor for picom.conf that:
-      - Loads lines preserving newline endings
-      - Can get and set top-level key = value lines (e.g. vsync = true;)
-      - Can parse and edit a 'blur: { ... };' block keys like method, strength
-      - Saves with backup and writes only modified lines
+    Minimal parser that preserves formatting and only edits existing value tokens by default.
     """
-    def __init__(self, path: str = None):
+    def __init__(self, path=None):
         self.path = Path(path or find_picom_path())
         self.lines = []
         self.load()
@@ -39,68 +30,58 @@ class PicomConfig:
             self.lines = self.path.read_text(encoding="utf-8").splitlines(True)
         else:
             self.lines = []
-        # normalize: ensure all lines end with newline
+        # normalize newline endings
         self.lines = [ln if ln.endswith("\n") else ln + "\n" for ln in self.lines]
 
-    def _find_top_key_idx(self, key: str):
-        # match lines like: key = value;
-        pattern = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
+    # find top-level key line index (key = ...;)
+    def _find_top_key_idx(self, key):
+        pat = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
         for i, ln in enumerate(self.lines):
-            if pattern.match(ln):
+            if pat.match(ln):
                 return i
         return None
 
-    def _find_block(self, block_name: str):
-        """
-        Find block like:
-        block_name:
-        {
-           ...;
-        };
-        Return (start_idx_of_block_header, start_brace_idx, end_brace_idx)
-        or (None,None,None) if not found.
-        """
-        header_pattern = re.compile(r'^\s*' + re.escape(block_name) + r'\s*:\s*$')
-        brace_open = None
-        brace_close = None
+    # find block (header line like 'blur:' then { ... } ;) returning (header_idx, open_idx, close_idx)
+    def _find_block(self, block_name):
+        header_pat = re.compile(r'^\s*' + re.escape(block_name) + r'\s*:\s*$')
         header_idx = None
+        open_idx = None
+        close_idx = None
         for i, ln in enumerate(self.lines):
-            if header_pattern.match(ln):
+            if header_pat.match(ln):
                 header_idx = i
-                # next non-empty line should be '{'
+                # find next '{'
                 j = i + 1
                 while j < len(self.lines) and self.lines[j].strip() == "":
                     j += 1
                 if j < len(self.lines) and self.lines[j].strip().startswith("{"):
-                    brace_open = j
-                    # find matching closing brace on or after j
-                    k = j + 1
+                    open_idx = j
                     depth = 1
+                    k = j + 1
                     while k < len(self.lines):
                         if "{" in self.lines[k]:
                             depth += self.lines[k].count("{")
                         if "}" in self.lines[k]:
                             depth -= self.lines[k].count("}")
                             if depth == 0:
-                                brace_close = k
+                                close_idx = k
                                 break
                         k += 1
                 break
-        return header_idx, brace_open, brace_close
+        return header_idx, open_idx, close_idx
 
-    def get(self, key: str, default=None):
-        # support block keys with dot: e.g. blur.strength
+    # read a key; supports block.key
+    def get(self, key, default=None):
         if "." in key:
             block, sub = key.split(".", 1)
             h, bo, bc = self._find_block(block)
             if bo is None or bc is None:
                 return default
-            pat = re.compile(r'^\s*' + re.escape(sub) + r'\s*=\s*(.+);')
+            sub_pat = re.compile(r'^\s*' + re.escape(sub) + r'\s*=\s*(.+);')
             for ln in self.lines[bo+1:bc]:
-                m = pat.match(ln)
+                m = sub_pat.match(ln)
                 if m:
                     val = m.group(1).strip()
-                    # strip quotes if present
                     if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
                         return val[1:-1]
                     return val
@@ -109,8 +90,7 @@ class PicomConfig:
             idx = self._find_top_key_idx(key)
             if idx is None:
                 return default
-            ln = self.lines[idx]
-            m = re.match(r'^\s*' + re.escape(key) + r'\s*=\s*(.+);', ln)
+            m = re.match(r'^\s*' + re.escape(key) + r'\s*=\s*(.+);', self.lines[idx])
             if m:
                 val = m.group(1).strip()
                 if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
@@ -118,65 +98,68 @@ class PicomConfig:
                 return val
             return default
 
-    def set(self, key: str, value):
-        # convert booleans to 'true'/'false' strings if bool passed
-        if isinstance(value, bool):
-            vstr = "true" if value else "false"
-        else:
-            vstr = str(value)
-        # add semicolon at end if not inside block
-        if "." in key:
-            block, sub = key.split(".", 1)
-            h, bo, bc = self._find_block(block)
-            if bo is None:
-                # create a block at end
-                insert_at = len(self.lines)
-                self.lines.append(f"\n{block}:\n{{\n    {sub} = {vstr};\n}};\n")
-                return
-            # update existing subkey inside block, or insert before closing brace
-            pat = re.compile(r'^\s*' + re.escape(sub) + r'\s*=')
-            for i in range(bo+1, bc):
-                if pat.match(self.lines[i]):
-                    # keep indentation
-                    indent = re.match(r'^(\s*)', self.lines[i]).group(1)
-                    self.lines[i] = f"{indent}{sub} = {vstr};\n"
-                    return
-            # not found -> insert before bc
-            indent = "    "
-            self.lines.insert(bc, f"{indent}{sub} = {vstr};\n")
-            return
-        else:
-            idx = self._find_top_key_idx(key)
-            line = f"{key} = {vstr};\n"
-            if idx is None:
-                # append at end
-                # ensure there's a blank line before appending for readability
-                if len(self.lines) and not self.lines[-1].endswith("\n\n"):
-                    self.lines.append("\n")
-                self.lines.append(line)
-            else:
-                # replace line
-                self.lines[idx] = line
+    # ONLY change existing top-level key. Returns True if changed, False if key not found.
+    def set_existing_top(self, key, value):
+        idx = self._find_top_key_idx(key)
+        if idx is None:
+            return False
+        # keep left-side spacing and replace value token, preserve semicolon/newline
+        ln = self.lines[idx]
+        # find start of assignment after '='
+        prefix_match = re.match(r'^(\s*' + re.escape(key) + r'\s*=\s*)(.*?)(;?\s*\n?)$', ln)
+        if not prefix_match:
+            # fallback - just replace whole line
+            self.lines[idx] = f"{key} = {value};\n"
+            return True
+        prefix = prefix_match.group(1)
+        suffix = prefix_match.group(3)
+        self.lines[idx] = f"{prefix}{value}{suffix if suffix.endswith('\\n') else suffix+'\\n'}"
+        return True
 
-    def save(self, backup: bool = True):
+    # ONLY change existing sub-key inside an existing block. Returns True if changed, False if not present.
+    def set_existing_block_key(self, block, sub, value):
+        h, bo, bc = self._find_block(block)
+        if bo is None or bc is None:
+            return False
+        sub_pat = re.compile(r'^\s*' + re.escape(sub) + r'\s*=')
+        for i in range(bo+1, bc):
+            if sub_pat.match(self.lines[i]):
+                # keep indentation
+                indent = re.match(r'^(\s*)', self.lines[i]).group(1)
+                self.lines[i] = f"{indent}{sub} = {value};\n"
+                return True
+        return False
+
+    # Append top-level key (used only when user confirms) — returns True
+    def append_top_key(self, key, value):
+        # append at end, preserving a blank line
+        if len(self.lines) and not self.lines[-1].endswith("\n\n"):
+            self.lines.append("\n")
+        self.lines.append(f"{key} = {value};\n")
+        return True
+
+    # Append a block (used only when user confirms) — returns True
+    def append_block(self, block, pairs: dict):
+        if len(self.lines) and not self.lines[-1].endswith("\n\n"):
+            self.lines.append("\n")
+        self.lines.append(f"{block}:\n{{\n")
+        for k, v in pairs.items():
+            self.lines.append(f"    {k} = {v};\n")
+        self.lines.append("};\n")
+        return True
+
+    # Save absolute: creates timestamped backup if requested
+    def save(self, backup=True):
         if backup and self.path.exists():
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             bak = self.path.with_suffix(self.path.suffix + f".bak.{ts}")
             shutil.copy2(self.path, bak)
-        # ensure parent exists
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("".join(self.lines), encoding="utf-8")
-        # reload to normalize
         self.load()
 
-# ---------- factory that builds and returns the Qt widget (lazy) ----------
+# Lazy GUI factory (import Qt only inside factory)
 def create_editor(core_config=None):
-    """
-    Factory called by the core after QApplication exists.
-    Returns a QWidget instance (Editor widget).
-    """
-
-    # Import Qt inside factory to avoid creating Qt objects at module import time
     try:
         from PyQt6.QtWidgets import (
             QWidget, QVBoxLayout, QLabel, QComboBox, QCheckBox,
@@ -191,175 +174,161 @@ def create_editor(core_config=None):
         from PyQt5.QtCore import Qt
 
     class PicomEditor(QWidget):
-        def __init__(self, core_cfg=None):
+        def __init__(self, *_):
             super().__init__()
-            # always edit user's picom.conf (not core's i3 config)
-            self.cfg_path = find_picom_path()
-            self.cfg = PicomConfig(self.cfg_path)
+            self.cfg = PicomConfig(find_picom_path())
             self._build_ui()
 
         def _build_ui(self):
             layout = QVBoxLayout()
             self.setLayout(layout)
-
             layout.addWidget(QLabel(f"Editing: {self.cfg.path}"))
 
-            # Backend
+            # backend
             layout.addWidget(QLabel("Backend"))
-            self.backend_cb = QComboBox()
-            self.backend_cb.addItems(["xrender", "glx", "xr_glx_hybrid"])
-            self.backend_cb.setCurrentText(self.cfg.get("backend", "glx"))
+            self.backend_cb = QComboBox(); self.backend_cb.addItems(["xrender", "glx", "xr_glx_hybrid"])
+            self.backend_cb.setCurrentText(self.cfg.get("backend", "glx") or "glx")
             layout.addWidget(self.backend_cb)
 
-            # VSync
-            self.vsync_cb = QCheckBox("VSync")
-            self.vsync_cb.setChecked(str(self.cfg.get("vsync", "true")).lower() == "true")
-            layout.addWidget(self.vsync_cb)
+            # vsync
+            self.vsync_cb = QCheckBox("VSync"); self.vsync_cb.setChecked(str(self.cfg.get("vsync", "true")).lower()=="true"); layout.addWidget(self.vsync_cb)
 
-            # Opacities
-            self.inactive_spin = QDoubleSpinBox()
-            self.inactive_spin.setRange(0.0, 1.0); self.inactive_spin.setSingleStep(0.01)
-            try:
-                self.inactive_spin.setValue(float(self.cfg.get("inactive-opacity", 0.7)))
-            except Exception:
-                self.inactive_spin.setValue(0.7)
+            # opacities (top-level)
             layout.addWidget(QLabel("Inactive opacity"))
-            layout.addWidget(self.inactive_spin)
+            self.inactive = QDoubleSpinBox(); self.inactive.setRange(0.0, 1.0); self.inactive.setSingleStep(0.01)
+            try: self.inactive.setValue(float(self.cfg.get("inactive-opacity", 0.7)))
+            except: self.inactive.setValue(0.7)
+            layout.addWidget(self.inactive)
 
-            self.active_spin = QDoubleSpinBox()
-            self.active_spin.setRange(0.0, 1.0); self.active_spin.setSingleStep(0.01)
-            try:
-                self.active_spin.setValue(float(self.cfg.get("active-opacity", 1.0)))
-            except Exception:
-                self.active_spin.setValue(1.0)
             layout.addWidget(QLabel("Active opacity"))
-            layout.addWidget(self.active_spin)
+            self.active = QDoubleSpinBox(); self.active.setRange(0.0, 1.0); self.active.setSingleStep(0.01)
+            try: self.active.setValue(float(self.cfg.get("active-opacity", 1.0)))
+            except: self.active.setValue(1.0)
+            layout.addWidget(self.active)
 
-            self.frame_spin = QDoubleSpinBox()
-            self.frame_spin.setRange(0.0, 1.0); self.frame_spin.setSingleStep(0.01)
-            try:
-                self.frame_spin.setValue(float(self.cfg.get("frame-opacity", 1.0)))
-            except Exception:
-                self.frame_spin.setValue(1.0)
-            layout.addWidget(QLabel("Frame opacity"))
-            layout.addWidget(self.frame_spin)
+            # blur block keys (show UI but edits will only modify existing block keys by default)
+            layout.addWidget(QLabel("Blur method (block)"))
+            self.blur_method = QComboBox(); self.blur_method.addItems(["dual_kawase","kawase","box","gaussian","none"])
+            bm = self.cfg.get("blur.method", "")
+            if bm: self.blur_method.setCurrentText(bm)
+            layout.addWidget(self.blur_method)
 
-            # Blur block
-            layout.addWidget(QLabel("Blur method"))
-            self.blur_method_cb = QComboBox()
-            self.blur_method_cb.addItems(["none", "kawase", "dual_kawase", "box", "gaussian"])
-            self.blur_method_cb.setCurrentText(self.cfg.get("blur.method", "dual_kawase") or "dual_kawase")
-            layout.addWidget(self.blur_method_cb)
+            layout.addWidget(QLabel("Blur strength (block)"))
+            self.blur_strength = QDoubleSpinBox(); self.blur_strength.setRange(0,100); self.blur_strength.setSingleStep(1)
+            try: self.blur_strength.setValue(float(self.cfg.get("blur.strength", 5)))
+            except: self.blur_strength.setValue(5)
+            layout.addWidget(self.blur_strength)
 
-            layout.addWidget(QLabel("Blur strength"))
-            self.blur_strength_spin = QDoubleSpinBox()
-            self.blur_strength_spin.setRange(0, 50); self.blur_strength_spin.setSingleStep(1)
-            try:
-                self.blur_strength_spin.setValue(float(self.cfg.get("blur.strength", 5)))
-            except Exception:
-                self.blur_strength_spin.setValue(5)
-            layout.addWidget(self.blur_strength_spin)
-
-            # Shadows
-            self.shadow_cb = QCheckBox("Enable shadow")
-            self.shadow_cb.setChecked(str(self.cfg.get("shadow", "true")).lower() == "true")
-            layout.addWidget(self.shadow_cb)
-
-            self.shadow_radius_spin = QDoubleSpinBox()
-            self.shadow_radius_spin.setRange(0, 200); self.shadow_radius_spin.setSingleStep(1)
-            try:
-                self.shadow_radius_spin.setValue(float(self.cfg.get("shadow-radius", 12)))
-            except Exception:
-                self.shadow_radius_spin.setValue(12)
-            layout.addWidget(QLabel("Shadow radius"))
-            layout.addWidget(self.shadow_radius_spin)
-
-            self.shadow_opacity_spin = QDoubleSpinBox()
-            self.shadow_opacity_spin.setRange(0.0, 1.0); self.shadow_opacity_spin.setSingleStep(0.01)
-            try:
-                self.shadow_opacity_spin.setValue(float(self.cfg.get("shadow-opacity", 0.25)))
-            except Exception:
-                self.shadow_opacity_spin.setValue(0.25)
+            # shadows
+            self.shadow_cb = QCheckBox("Shadow"); self.shadow_cb.setChecked(str(self.cfg.get("shadow", "true")).lower()=="true"); layout.addWidget(self.shadow_cb)
             layout.addWidget(QLabel("Shadow opacity"))
-            layout.addWidget(self.shadow_opacity_spin)
+            self.shadow_op = QDoubleSpinBox(); self.shadow_op.setRange(0.0,1.0); self.shadow_op.setSingleStep(0.01)
+            try: self.shadow_op.setValue(float(self.cfg.get("shadow-opacity", 0.25)))
+            except: self.shadow_op.setValue(0.25)
+            layout.addWidget(self.shadow_op)
 
-            # Rounded corners
-            self.rounded_cb = QCheckBox("Enable rounded corners")
-            self.rounded_cb.setChecked(str(self.cfg.get("rounded-corners", "true")).lower() == "true")
-            layout.addWidget(self.rounded_cb)
-
-            self.corner_spin = QDoubleSpinBox()
-            self.corner_spin.setRange(0, 200); self.corner_spin.setSingleStep(1)
-            try:
-                self.corner_spin.setValue(int(float(self.cfg.get("corner-radius", 10))))
-            except Exception:
-                self.corner_spin.setValue(10)
+            # corner radius
             layout.addWidget(QLabel("Corner radius"))
-            layout.addWidget(self.corner_spin)
+            self.corner = QDoubleSpinBox(); self.corner.setRange(0,200); self.corner.setSingleStep(1)
+            try: self.corner.setValue(int(float(self.cfg.get("corner-radius", 10))))
+            except: self.corner.setValue(10)
+            layout.addWidget(self.corner)
 
-            # Fading
-            self.fading_cb = QCheckBox("Enable fading")
-            self.fading_cb.setChecked(str(self.cfg.get("fading", "true")).lower() == "true")
-            layout.addWidget(self.fading_cb)
-
-            self.fade_in_spin = QDoubleSpinBox()
-            self.fade_in_spin.setRange(0.0, 1.0); self.fade_in_spin.setSingleStep(0.01)
-            try:
-                self.fade_in_spin.setValue(float(self.cfg.get("fade-in-step", 0.03)))
-            except Exception:
-                self.fade_in_spin.setValue(0.03)
+            # fading
+            self.fading_cb = QCheckBox("Fading"); self.fading_cb.setChecked(str(self.cfg.get("fading","true")).lower()=="true"); layout.addWidget(self.fading_cb)
             layout.addWidget(QLabel("Fade-in step"))
-            layout.addWidget(self.fade_in_spin)
+            self.fade_in = QDoubleSpinBox(); self.fade_in.setRange(0.0,1.0); self.fade_in.setSingleStep(0.01)
+            try: self.fade_in.setValue(float(self.cfg.get("fade-in-step", 0.03)))
+            except: self.fade_in.setValue(0.03)
+            layout.addWidget(self.fade_in)
 
-            self.fade_out_spin = QDoubleSpinBox()
-            self.fade_out_spin.setRange(0.0, 1.0); self.fade_out_spin.setSingleStep(0.01)
-            try:
-                self.fade_out_spin.setValue(float(self.cfg.get("fade-out-step", 0.03)))
-            except Exception:
-                self.fade_out_spin.setValue(0.03)
-            layout.addWidget(QLabel("Fade-out step"))
-            layout.addWidget(self.fade_out_spin)
-
-            self.fade_delta_spin = QDoubleSpinBox()
-            self.fade_delta_spin.setRange(0, 1000); self.fade_delta_spin.setSingleStep(1)
-            try:
-                self.fade_delta_spin.setValue(int(float(self.cfg.get("fade-delta", 10))))
-            except Exception:
-                self.fade_delta_spin.setValue(10)
-            layout.addWidget(QLabel("Fade delta (ms)"))
-            layout.addWidget(self.fade_delta_spin)
-
-            # Save button row
+            # Save
             btn_row = QHBoxLayout()
-            save_btn = QPushButton("Save Picom config")
+            save_btn = QPushButton("Save (safe)")
             save_btn.clicked.connect(self._on_save)
             btn_row.addWidget(save_btn)
             layout.addLayout(btn_row)
 
         def _on_save(self):
-            # set values back into cfg
-            self.cfg.set("backend", self.backend_cb.currentText())
-            self.cfg.set("vsync", "true" if self.vsync_cb.isChecked() else "false")
-            self.cfg.set("inactive-opacity", str(self.inactive_spin.value()))
-            self.cfg.set("active-opacity", str(self.active_spin.value()))
-            self.cfg.set("frame-opacity", str(self.frame_spin.value()))
-            self.cfg.set("blur.method", self.blur_method_cb.currentText())
-            self.cfg.set("blur.strength", str(int(self.blur_strength_spin.value())))
-            self.cfg.set("shadow", "true" if self.shadow_cb.isChecked() else "false")
-            self.cfg.set("shadow-radius", str(int(self.shadow_radius_spin.value())))
-            self.cfg.set("shadow-opacity", str(self.shadow_opacity_spin.value()))
-            self.cfg.set("rounded-corners", "true" if self.rounded_cb.isChecked() else "false")
-            self.cfg.set("corner-radius", str(int(self.corner_spin.value())))
-            self.cfg.set("fading", "true" if self.fading_cb.isChecked() else "false")
-            self.cfg.set("fade-in-step", str(self.fade_in_spin.value()))
-            self.cfg.set("fade-out-step", str(self.fade_out_spin.value()))
-            self.cfg.set("fade-delta", str(int(self.fade_delta_spin.value())))
-            try:
-                self.cfg.save(backup=True)
-                QMessageBox.information(self, "Saved", f"Saved {self.cfg.path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+            # Attempt to set existing keys first
+            missing_actions = []  # list of tuples describing missing targets: ("top", key, value) or ("block", block, sub, value)
+            changed = []
+            # top-level keys:
+            if not self.cfg.set_existing_top("backend", self.backend_cb.currentText()):
+                missing_actions.append(("top", "backend", self.backend_cb.currentText()))
+            if not self.cfg.set_existing_top("vsync", "true" if self.vsync_cb.isChecked() else "false"):
+                missing_actions.append(("top","vsync","true" if self.vsync_cb.isChecked() else "false"))
+            if not self.cfg.set_existing_top("inactive-opacity", str(self.inactive.value())):
+                missing_actions.append(("top","inactive-opacity", str(self.inactive.value())))
+            if not self.cfg.set_existing_top("active-opacity", str(self.active.value())):
+                missing_actions.append(("top","active-opacity", str(self.active.value())))
+            if not self.cfg.set_existing_block_key("blur","method", f'"{self.blur_method.currentText()}"'):
+                missing_actions.append(("block","blur","method", f'"{self.blur_method.currentText()}"'))
+            if not self.cfg.set_existing_block_key("blur","strength", str(int(self.blur_strength.value()))):
+                missing_actions.append(("block","blur","strength", str(int(self.blur_strength.value()))))
+            if not self.cfg.set_existing_top("shadow", "true" if self.shadow_cb.isChecked() else "false"):
+                missing_actions.append(("top","shadow","true" if self.shadow_cb.isChecked() else "false"))
+            if not self.cfg.set_existing_top("shadow-opacity", str(self.shadow_op.value())):
+                missing_actions.append(("top","shadow-opacity", str(self.shadow_op.value())))
+            if not self.cfg.set_existing_top("corner-radius", str(int(self.corner.value()))):
+                missing_actions.append(("top","corner-radius", str(int(self.corner.value()))))
+            if not self.cfg.set_existing_top("fading", "true" if self.fading_cb.isChecked() else "false"):
+                missing_actions.append(("top","fading","true" if self.fading_cb.isChecked() else "false"))
+            if not self.cfg.set_existing_top("fade-in-step", str(self.fade_in.value())):
+                missing_actions.append(("top","fade-in-step", str(self.fade_in.value())))
 
-    # return an instance of the editor (core will call this after QApplication exists)
+            # if nothing missing, write immediately
+            if not missing_actions:
+                try:
+                    self.cfg.save(backup=True)
+                    QMessageBox.information(self, "Saved", f"Saved {self.cfg.path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                return
+
+            # Otherwise ask user what to do: show a list and ask whether to append missing items (only if user agrees)
+            msg = "Some keys you changed were NOT found in your existing picom.conf. By default the editor does not create new blocks or keys to avoid changing structure.\n\nMissing items:\n"
+            for ma in missing_actions:
+                if ma[0] == "top":
+                    msg += f"  (top) {ma[1]} = {ma[2]}\n"
+                else:
+                    msg += f"  (block) {ma[1]}.{ma[2]} = {ma[3]}\n"
+            msg += "\nDo you want the editor to append the missing TOP-LEVEL keys and blocks? (Cancel will save only the existing-key changes.)"
+            resp = QMessageBox.question(self, "Missing keys", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            if resp == QMessageBox.StandardButton.Cancel:
+                # save what we did (only existing changes) and return
+                try:
+                    self.cfg.save(backup=True)
+                    QMessageBox.information(self, "Saved", f"Saved existing-key changes to {self.cfg.path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                return
+            if resp == QMessageBox.StandardButton.No:
+                # do not append missing, just save existing-key edits
+                try:
+                    self.cfg.save(backup=True)
+                    QMessageBox.information(self, "Saved", f"Saved existing-key changes to {self.cfg.path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+                return
+            if resp == QMessageBox.StandardButton.Yes:
+                # append missing top-level and blocks (top-level appended as key=value;) and blocks created for missing block keys
+                for ma in missing_actions:
+                    if ma[0] == "top":
+                        self.cfg.append_top_key(ma[1], ma[2])
+                    else:
+                        # collect block-created pairs if block doesn't exist; if block exists but key missing, set_existing_block_key would have succeeded already
+                        h, bo, bc = self.cfg._find_block(ma[1])
+                        if bo is None:
+                            # create block with this one pair
+                            self.cfg.append_block(ma[1], {ma[2]: ma[3]})
+                        else:
+                            # block exists but key didn't — insert before closing brace
+                            self.cfg.lines.insert(bc, f"    {ma[2]} = {ma[3]};\n")
+                try:
+                    self.cfg.save(backup=True)
+                    QMessageBox.information(self, "Saved", f"Saved (with appended missing items) to {self.cfg.path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Save failed", f"Failed to save: {e}")
+
     return PicomEditor(core_config)
-
