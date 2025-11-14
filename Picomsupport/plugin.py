@@ -74,24 +74,41 @@ class PicomConfig:
 
     # safe formatting: do NOT escape quotes; caller may pass quoted strings if desired
     def _format_value(self, v):
-        # booleans: True/False or 'true'/'false' expected -> normalize to true/false
+        """
+        Produce a picom-safe textual representation for a value **without** adding
+        redundant quotes. Rules:
+          - Python bools -> 'true'/'false' (no quotes)
+          - Strings exactly 'true' or 'false' (case-insensitive) -> returned lowercased (no quotes)
+          - Numeric-looking strings or numbers -> returned without quotes
+          - Strings already quoted (start/end with " or ') -> returned unchanged
+          - Otherwise wrap in double quotes
+        """
+        # booleans first
         if isinstance(v, bool):
             return "true" if v else "false"
+
         s = str(v)
-        # if string already looks quoted, keep as-is
+
+        # if caller passed explicit picom literal true/false as string -> keep as bare
+        if s.strip().lower() in ("true", "false"):
+            return s.strip().lower()
+
+        # keep strings already quoted
         if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
             return s
-        # if it looks like a number, return bare
+
+        # numeric?
         try:
             int(s)
             return s
-        except ValueError:
+        except Exception:
             try:
                 float(s)
                 return s
-            except ValueError:
+            except Exception:
                 pass
-        # otherwise wrap in double quotes (safe for picom)
+
+        # default: wrap in double quotes (safe)
         return f'"{s}"'
 
     def get(self, key: str, default=None):
@@ -140,9 +157,7 @@ class PicomConfig:
             self.lines[idx] = f"{key} = {val_str};\n"
             return True
         left = m.group(1)
-        right = m.group(3) or ";"  # if group(3) None, ensure semicolon present
-        newline = "\n" if (m.group(4) == "\n") else "\n"
-        # preserve trailing comment if any: right already contains ; and any trailing comments
+        right = m.group(3) or ";"
         # ensure right ends with newline
         if not right.endswith("\n"):
             right = right + "\n"
@@ -162,7 +177,6 @@ class PicomConfig:
             m = sub_pat.match(self.lines[i])
             if m:
                 indent = m.group(1) or ""
-                # keep trailing comment if present
                 trailing = m.group(3) or ";"
                 if not trailing.endswith("\n"):
                     trailing = trailing + "\n"
@@ -259,7 +273,6 @@ def create_editor(core_config=None):
             self.blur_method.addItems(["dual_kawase", "kawase", "box", "gaussian", "none"])
             bm = self.cfg.get("blur.method", "")
             if bm:
-                # if stored without quotes, it may be bare; normalize
                 self.blur_method.setCurrentText(bm.strip('"').strip("'"))
             layout.addWidget(self.blur_method)
 
